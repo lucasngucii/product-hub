@@ -2,17 +2,16 @@ import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { CalendarRange, LayoutGrid, List } from 'lucide-react';
 import { Badge, Button, Checkbox, Switch } from '@/components/ui';
+import { AssigneeBadge } from '@/components/AssigneeBadge';
 import { BoardSkeleton, ListSkeleton, TimelineSkeleton } from '@/components/Skeletons';
 import { BOARD_GUTTER, IssueBoardLayout } from '@/components/IssueBoardLayout';
 import { BoardCard, BoardCardAge, KanbanBoard, KanbanCardToolbar } from '@/components/KanbanBoard';
 import { IssueTimelineView } from '@/features/issues/IssueTimelineView';
+import { SortMenu } from '@/features/issues/SortMenu';
+import { useIssueSort } from '@/features/issues/useIssueSort';
 import { LabelChips } from '@/features/labels/LabelChips';
-import {
-  FilterMenu,
-  UNASSIGNED,
-  type FilterCategory,
-  type FilterSelections,
-} from '@/components/FilterMenu';
+import { FilterMenu, type FilterCategory, type FilterSelections } from '@/components/FilterMenu';
+import { issueSharedFilterParams, issueSharedFilters } from '@/features/issues/issueFilters';
 import { t } from '@/i18n';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/auth';
@@ -26,17 +25,14 @@ import {
   CycleBoardBanner,
   CycleChip,
   CycleFilterSelect,
+  IssueCycleChip,
 } from '@/features/cycles/CycleControls';
-import { useCycles, useFocusedCycle, useResolvedCycleId } from '@/features/cycles/api';
+import { useCycleLookup, useCycles, useFocusedCycle, useResolvedCycleId } from '@/features/cycles/api';
 import { CycleInsightsButton } from '@/features/cycles/CycleInsights';
 import { useIssueSelection, type IssueSelection } from '@/features/issues/useIssueSelection';
-import {
-  BulkActionBar,
-  buildAssigneeOptions,
-  buildCycleOptions,
-} from '@/features/issues/BulkActionBar';
+import { BulkActionBar, buildCycleOptions } from '@/features/issues/BulkActionBar';
 import { TaskStatus, TeamIssueType, type TaskLabelConfig, type TeamStatusConfig } from '@/types/enums';
-import type { TaskDto, TeamDto } from '@/types/dto';
+import type { CycleDto, TaskDto, TeamDto } from '@/types/dto';
 import { useDeleteTask, useSetTaskStatus, useTasks } from './api';
 
 /** The engineer's personal queue — every task assigned to them, as a kanban
@@ -119,6 +115,12 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
 
   const [filters, setFilters] = useState<FilterSelections>({});
   const [search, setSearch] = useState('');
+  // List-view ordering only (see `SortMenu`), and opt-in: until the user picks
+  // one, neither param is sent, so board, timeline and a fresh list all keep the
+  // ordering they have today. It rides in ?sort=&dir= like `view` above, so a
+  // reload or a shared link keeps it. No severity: a task hasn't got one.
+  const [sort, setSort] = useIssueSort();
+  const isList = view === 'list';
 
   // Strictly assigned to me — the view is titled "Assigned to me". Tasks I create
   // from here still appear because New task defaults the assignee to me. Sentinel
@@ -129,10 +131,16 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
     // Inside a team the list is the team's issues; standalone it's *my* queue.
     mine: teamId ? undefined : user?.id ?? '__none__',
     status: filters.status as TaskStatus[] | undefined,
-    assigneeId: filters.assigneeId,
+    // Assignee, creator and the two date windows — the block every board shares.
+    ...issueSharedFilterParams(filters),
     roadmapItemId: filters.roadmapItemId,
     projectId: filters.projectId,
     cycleId: teamId ? cycleParam || undefined : undefined,
+    // Only the list view orders itself. Sending `sort` makes the API drop the
+    // stored `order`, so the board (whose order *is* the drag position) and the
+    // timeline must send neither param.
+    sort: isList && sort ? sort.field : undefined,
+    dir: isList && sort ? sort.dir : undefined,
   });
   const tasks = data?.items ?? [];
   // Offer the toggle only when there's something to hide; filter client-side (the
@@ -140,6 +148,10 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
   // `hasSubtasks` — stays stable whether they're shown or hidden.
   const hasSubtasks = tasks.some((tk) => tk.parentId);
   const visibleTasks = showSubtasks ? tasks : tasks.filter((tk) => !tk.parentId);
+  // Each card names its own cycle — at the default all-cycles scope that's the
+  // only place it's stated. Resolved per-row like the labels above, and scoped to
+  // the teams actually on this board (this one spans teams when standalone).
+  const cycleFor = useCycleLookup(tasks.map((tk) => tk.teamId));
   const setStatus = useSetTaskStatus();
   const remove = useDeleteTask();
 
@@ -155,7 +167,6 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
   const bulkEnabled = !!teamId && canWrite;
   const cyclesEnabled = !!shareTeam?.cyclesEnabled;
   const { data: cyclesData } = useCycles(cyclesEnabled ? teamId : undefined);
-  const assigneeOptions = buildAssigneeOptions(user, usersData?.items);
   const cycleOptions = cyclesEnabled ? buildCycleOptions(cyclesData) : undefined;
 
   const filterCategories: FilterCategory[] = [
@@ -163,15 +174,6 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
       id: 'status',
       label: t('roadmaps.status'),
       options: columns.map((c) => ({ id: c.key, label: c.label, color: c.color })),
-    },
-    {
-      id: 'assigneeId',
-      label: t('filters.assignee'),
-      searchable: true,
-      options: [
-        { id: UNASSIGNED, label: t('filters.unassigned') },
-        ...(usersData?.items ?? []).map((u) => ({ id: u.id, label: u.name })),
-      ],
     },
     {
       id: 'roadmapItemId',
@@ -188,6 +190,11 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
       searchable: true,
       options: (projectsData?.items ?? []).map((p) => ({ id: p.id, label: p.title })),
     },
+    // Assignee · creator · created date · solved date — identical on every board.
+    // Assignee is dropped on the standalone "Assigned to me" queue: that list is
+    // already one person's (the API's `mine` wins over any assignee filter), so
+    // the row could only ever return the same board back.
+    ...issueSharedFilters({ user, users: usersData?.items, includeAssignee: !!teamId }),
   ];
 
   /** Tasks don't persist ordering, so the drop slot is ignored — only the
@@ -222,6 +229,7 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
           )}
         </div>
       }
+      sort={isList ? <SortMenu value={sort} onChange={setSort} /> : undefined}
       filtersEnd={
         <>
           {/* Insights lives in the cycle bar; that bar only exists when the board
@@ -281,7 +289,12 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
           getId={(tk) => tk.id}
           getColumnKey={(tk) => tk.status}
           renderCard={(task, overlay) => (
-            <TaskCard task={task} labels={labelsFor(task.teamId)} overlay={overlay} />
+            <TaskCard
+              task={task}
+              labels={labelsFor(task.teamId)}
+              cycle={cycleFor(task.cycleId)}
+              overlay={overlay}
+            />
           )}
           onMove={onMove}
           disabled={!canWrite}
@@ -317,6 +330,7 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
             tasks={visibleTasks}
             columns={columns}
             labelsFor={labelsFor}
+            cycleFor={cycleFor}
             selection={bulkEnabled ? selection : undefined}
           />
         </div>
@@ -331,7 +345,6 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
           selection={selection}
           visibleIds={visibleTasks.map((tk) => tk.id)}
           columns={columns}
-          assignees={assigneeOptions}
           cycles={cycleOptions}
         />
       )}
@@ -345,10 +358,14 @@ export function MyTasksPage({ teamId, teamName, titleIcon, shareTeam }: MyTasksP
 export function TaskCard({
   task,
   labels,
+  cycle,
   overlay = false,
 }: {
   task: TaskDto;
   labels?: TaskLabelConfig[];
+  /** The cycle this task is committed to, resolved by the board (`useCycleLookup`)
+   *  — a hook per card isn't legal and the rows can span teams. */
+  cycle?: CycleDto;
   overlay?: boolean;
 }) {
   const done = task.status === TaskStatus.DONE;
@@ -357,11 +374,16 @@ export function TaskCard({
       overlay={overlay}
       title={task.title}
       titleClassName={done ? 'text-muted-foreground line-through' : undefined}
-      labels={<LabelChips keys={task.labelKeys} labels={labels} />}
+      labels={
+        // Cycle first, like the roadmap card: "when" is what you scan a board for.
+        // Wraps — a card is narrow and a half-clipped chip reads as broken.
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          <IssueCycleChip cycle={cycle} />
+          <LabelChips keys={task.labelKeys} labels={labels} />
+        </div>
+      }
       metaLeading={
-        <Badge variant="muted" className="max-w-full truncate">
-          {task.assigneeName || t('tasks.unassigned')}
-        </Badge>
+        <AssigneeBadge assignees={task.assignees} unassignedLabel={t('tasks.unassigned')} />
       }
       metaTrailing={
         <>
@@ -381,12 +403,16 @@ export function TaskList({
   tasks,
   columns,
   labelsFor,
+  cycleFor,
   onOpen,
   selection,
 }: {
   tasks: TaskDto[];
   columns: TeamStatusConfig[];
   labelsFor: (teamId: string | undefined) => TaskLabelConfig[];
+  /** Row → its cycle (`useCycleLookup`). Optional so the public board, which has
+   *  no `/teams` access, simply renders rows without a cycle chip. */
+  cycleFor?: (cycleId: string | undefined) => CycleDto | undefined;
   onOpen?: (task: TaskDto) => void;
   /** When present, each row gets a checkbox and each column a select-all. */
   selection?: IssueSelection;
@@ -423,6 +449,7 @@ export function TaskList({
                   key={task.id}
                   task={task}
                   labels={labelsFor(task.teamId)}
+                  cycle={cycleFor?.(task.cycleId)}
                   onOpen={onOpen}
                   selection={selection}
                 />
@@ -440,11 +467,13 @@ export function TaskList({
 function TaskRow({
   task,
   labels,
+  cycle,
   onOpen,
   selection,
 }: {
   task: TaskDto;
   labels: TaskLabelConfig[];
+  cycle?: CycleDto;
   onOpen?: (task: TaskDto) => void;
   selection?: IssueSelection;
 }) {
@@ -458,6 +487,9 @@ function TaskRow({
       >
         {task.title}
       </span>
+      {/* Hidden on mobile, like the labels beside it — a row has room for the
+          title and the assignee first. */}
+      <IssueCycleChip cycle={cycle} className="hidden shrink-0 sm:flex" />
       <LabelChips keys={task.labelKeys} labels={labels} max={3} className="hidden shrink-0 sm:flex" />
       {task.roadmapItemLabel && (
         <Badge variant="muted" className="max-w-[30%] shrink-0 truncate" title={task.roadmapItemLabel}>
@@ -467,9 +499,11 @@ function TaskRow({
       {task.shortId && (
         <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{task.shortId}</span>
       )}
-      <Badge variant="muted" className="max-w-[35%] shrink-0 truncate">
-        {task.assigneeName || t('tasks.unassigned')}
-      </Badge>
+      <AssigneeBadge
+        assignees={task.assignees}
+        unassignedLabel={t('tasks.unassigned')}
+        className="max-w-[35%] shrink-0"
+      />
     </>
   );
   // The click target keeps its own rounding/hover; the separator + selected tint

@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { customAlphabet } from 'nanoid';
 
 /**
@@ -17,9 +18,12 @@ const nano = customAlphabet(REF_ALPHABET, REF_LEN);
 
 /**
  * A random, unguessable URL ref for a task/bug, e.g. `TSK-6HCUHKX` / `BUG-WHHY3ZV`.
- * Uppercase on purpose: it matches the look of the legacy sequential ids and
- * survives the frontend's ref-uppercasing (see `taskRefsInText`). The prefix
- * names the type; the suffix is nanoid-random.
+ *
+ * LEGACY: nothing in the running application mints refs this way any more — every
+ * ref now comes from `CounterService` and is sequential (`ENG-14`). This survives
+ * only because the two superseded one-time scripts (`backfill-doc-refs`,
+ * `backfill-roadmap-item-refs`) still call it, and both carry a header saying not
+ * to run them. Do not reach for it in new code.
  */
 export function randomRef(prefix: string): string {
   return `${prefix}-${nano()}`;
@@ -38,28 +42,27 @@ export function shareToken(): string {
 }
 
 /**
+ * A secret for a machine, not a person: an integration webhook's URL token and
+ * its signing key. Neither is ever read aloud or typed by hand — they're copied
+ * between two admin screens — so unlike {@link shareToken} there's no reason to
+ * trade entropy for legibility, and these use full-strength random bytes.
+ *
+ * `base64url` for the URL half (path-safe, no escaping), hex for the signing key
+ * (what every provider's "Secret" field expects to be given).
+ */
+export function webhookUrlToken(): string {
+  return randomBytes(24).toString('base64url');
+}
+
+export function webhookSigningSecret(): string {
+  return randomBytes(32).toString('hex');
+}
+
+/**
  * The token to (re)enable a share link with: whatever it already had, so links
  * handed out earlier keep working — unless that's a legacy UUID, which is
  * upgraded to a short one. The hyphen is the tell; the short alphabet has none.
  */
 export function keepOrUpgradeShareToken(current: string | null | undefined): string {
   return current && !current.includes('-') ? current : shareToken();
-}
-
-/**
- * A `randomRef` proven free for this caller (per tenant, via `exists`). A
- * collision is astronomically unlikely and the DB has a unique index as the
- * hard backstop, but a create must never fail on the ~1-in-27-billion chance,
- * so we retry a few times and — in the practically-impossible case they all
- * collide — widen the suffix, which makes a repeat essentially impossible.
- */
-export async function uniqueRef(
-  prefix: string,
-  exists: (ref: string) => Promise<boolean>,
-): Promise<string> {
-  for (let i = 0; i < 5; i++) {
-    const ref = randomRef(prefix);
-    if (!(await exists(ref))) return ref;
-  }
-  return `${prefix}-${customAlphabet(REF_ALPHABET, 12)()}`;
 }

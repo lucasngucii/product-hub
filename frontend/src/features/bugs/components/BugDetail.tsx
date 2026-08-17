@@ -1,8 +1,9 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { toast } from 'sonner';
 import {
   CalendarRange,
   CircleDot,
-  CircleUser,
   FlaskConical,
   Trash2,
   TriangleAlert,
@@ -11,7 +12,6 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import {
-  Combobox,
   DateRangePicker,
   DotLabel,
   Input,
@@ -19,6 +19,7 @@ import {
   Select,
   formatDateRange,
 } from '@/components/ui';
+import { AssigneeField, fallbackNames } from '@/components/AssigneeField';
 import { DetailSkeleton } from '@/components/Skeletons';
 import { t } from '@/i18n';
 import {
@@ -41,6 +42,12 @@ import { BUG_TEMPLATES } from '../bugTemplates';
 import { SeverityBadge } from './SeverityBadge';
 import { useRelationActions } from '@/features/issues/useRelationActions';
 import { IssueRelations } from '@/features/issues/IssueRelations';
+import { PickIssueDialog, type PickedIssue } from '@/features/issues/PickIssueDialog';
+import { rootsOf } from '@/features/issues/issueTree';
+import { ParentPropField } from '@/features/issues/ParentPropField';
+import { BacklogItemPropField } from '@/features/issues/BacklogItemPropField';
+import { useIssues, useUpdateIssue } from '@/features/issues/api';
+import { SubtaskSection } from '@/features/tasks/components/SubtaskSection';
 
 interface BugDetailProps {
   /** Bug shortId or uuid (`useBug` resolves either). */
@@ -84,6 +91,14 @@ export function BugDetail({ bugId, onDeleted, menuTarget = 'header', dense = fal
   const { data: teams } = useTeams();
   const team = teams?.find((tm) => tm.id === bug?.teamId);
 
+  // Sub-issues, exactly as a task has them — a bug nests the same way (this one
+  // has 14 real children in prod that no screen used to show). `useIssues`, not
+  // `useBugs`, because a child follows the team it was filed in and may be either
+  // kind. The sentinel keeps the query keyed while the bug is still loading.
+  const [pickOpen, setPickOpen] = useState(false);
+  const { data: childData } = useIssues({ parentId: bug?.id ?? '__none__' });
+  const updateChild = useUpdateIssue();
+
   if (isLoading) {
     return <DetailSkeleton />;
   }
@@ -101,6 +116,24 @@ export function BugDetail({ bugId, onDeleted, menuTarget = 'header', dense = fal
   function save(input: Parameters<typeof update.mutate>[0]['input']) {
     update.mutate({ id: bug!.id, input });
   }
+
+  const childIds = (childData?.items ?? []).map((c) => c.id);
+  /** Attach existing issues under this bug: set their parent. They keep their own
+   *  team/assignee/status — "link, don't move", same as a task's sub-tasks.
+   *  Only the picked *roots* are re-parented; a picked issue whose own parent came
+   *  along stays under it, so a branch arrives with its shape intact. */
+  const linkExisting = async (picked: PickedIssue[]) => {
+    try {
+      for (const { id } of rootsOf(picked)) {
+        await updateChild.mutateAsync({ id, input: { parentId: bug!.id } });
+      }
+      setPickOpen(false);
+    } catch (err) {
+      // The API refuses a move that would loop the tree; say so instead of
+      // leaving the dialog looking like nothing happened.
+      toast.error(t('common.error'), { description: (err as Error).message });
+    }
+  };
 
   return (
     <IssueDetail
@@ -126,6 +159,52 @@ export function BugDetail({ bugId, onDeleted, menuTarget = 'header', dense = fal
       // Repro-steps shapes, offered on an empty description the way a backlog
       // item offers User Story / JTBD — a bug without steps can't be fixed.
       templates={BUG_TEMPLATES}
+      beforeActivity={
+        <>
+          <SubtaskSection
+            query={{ parentId: bug.id }}
+            createLink={{ parentId: bug.id, teamId: bug.teamId }}
+            // As on a task: the parent is the only link holding the row here, and
+            // the child bug survives on its own.
+            unlink={{ parentId: '' }}
+            unlinkLabel={t('subtasks.unlinkParent')}
+            composerTeams={
+              // Its own team only — a child filed from here belongs where the
+              // parent does, which for a bug team means it's created as a bug.
+              team
+                ? [
+                    {
+                      id: team.id,
+                      name: team.name,
+                      issueType: team.issueType,
+                      icon: team.icon,
+                      color: team.color,
+                    },
+                  ]
+                : []
+            }
+            defaultTeamId={bug.teamId}
+            // The top entry of each row's Parent picker: "directly under this bug".
+            // No `separateBugs` here — every child of a bug is a bug, so the split
+            // would leave the sub-issue list empty and put everything below it.
+            rootParent={{ id: bug.id, title: bug.title }}
+            onLinkExisting={() => setPickOpen(true)}
+          />
+          {pickOpen && (
+            <PickIssueDialog
+              open={pickOpen}
+              onClose={() => setPickOpen(false)}
+              kind={IssueKind.BUG}
+              // Can't parent itself, and an existing child would be a no-op.
+              excludeIds={[bug.id, ...childIds]}
+              title={t('subtasks.linkBugTitle')}
+              multiple
+              onPick={linkExisting}
+              pending={updateChild.isPending}
+            />
+          )}
+        </>
+      }
       menuTarget={menuTarget}
       menuItems={[
         ...(canWrite ? [markAsItem] : []),
@@ -184,23 +263,31 @@ export function BugDetail({ bugId, onDeleted, menuTarget = 'header', dense = fal
             </PropField>
 
             <PropField bare label={t('bugs.assignee')}>
-              {isAdmin ? (
-                <Combobox
-                  leadingIcon={<CircleUser />}
-                  value={bug.assigneeId || ''}
-                  onChange={(v) => save({ assigneeId: v })}
-                  placeholder={t('bugs.unassigned')}
-                  options={[
-                    { value: '', label: t('bugs.unassigned') },
-                    ...users.map((u) => ({ value: u.id, label: u.name })),
-                  ]}
-                />
-              ) : (
-                <PropValue icon={<CircleUser />} muted={!bug.assigneeName}>
-                  {bug.assigneeName || t('bugs.unassigned')}
-                </PropValue>
-              )}
+              <AssigneeField
+                multiple
+                value={bug.assignees.map((a) => a.id)}
+                onChange={(ids) => save({ assigneeIds: ids })}
+                readOnly={!isAdmin}
+                fallbackNames={fallbackNames(bug.assignees)}
+                aria-label={t('bugs.assignee')}
+              />
             </PropField>
+
+            <ParentPropField
+              issueId={bug.id}
+              parentId={bug.parentId}
+              parentShortId={bug.parentShortId}
+              parentTitle={bug.parentTitle}
+              canWrite={canWrite}
+            />
+
+            <BacklogItemPropField
+              issueId={bug.id}
+              roadmapId={bug.roadmapId}
+              roadmapItemId={bug.roadmapItemId}
+              roadmapItemLabel={bug.roadmapItemLabel}
+              canWrite={canWrite}
+            />
 
             <PropField bare label={t('bugs.type')}>
               {canWrite ? (

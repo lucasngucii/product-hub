@@ -1,28 +1,44 @@
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react';
-import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { Link, NavLink, useLocation, useMatch, useNavigate } from 'react-router-dom';
 import { CalendarClock, ChevronDown, CircleDot, MoreHorizontal, Plus, X } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { Menu } from '@/components/ui';
 import { Icon, type IconName } from '@/components/Icon';
 import { cn } from '@/lib/utils';
 import { initials } from '@/lib/format';
-import type { NavItem } from '@/layouts/sidebar/menuConfig';
+import {
+  queryRowClaims,
+  searchMatches,
+  type NavArea,
+  type NavItem,
+} from '@/layouts/sidebar/menuConfig';
 import { t } from '@/i18n';
 import { FAVOURITE_KIND_LABEL, FavouriteKind } from '@/types/enums';
 import { useRemoveFavourite } from '@/features/favourites/api';
+import { useDeleteSavedView } from '@/features/saved-views/api';
 import { TeamIconPicker } from '@/features/teams/TeamIconPicker';
-import type { FavouriteDto, TeamDto } from '@/types/dto';
+import type { FavouriteDto, SavedViewDto, TeamDto } from '@/types/dto';
 
 /**
  * Every row the sidebar can render, and the state that remembers what's open.
  *
- * `Sidebar` owns the shape — one column, this order, this collapse — and none
- * of the rows: a team row, a favourite, a nav link and a section heading all
- * live here, so how they look and behave is decided in one place. Style a row
- * from the page that renders it and the two go out of step.
+ * A sidebar owns the shape and none of the parts: a rail button, a team row, a
+ * favourite, a nav link and a section heading all live here, so how they look and
+ * behave is decided in one place. Style one from the page that renders it and the
+ * two go out of step.
+ *
+ * **Both menus render from this file** — `Sidebar` (icon rail + panel) and
+ * `ClassicSidebar` (one stacked column). That's deliberate: a fix to the team
+ * row's drag, or to how a favourite unpins, has to reach whichever menu the user
+ * has chosen, and one copy is the only way that's true.
+ *
+ * The rows differ in exactly one respect, the optional `collapsed` prop: the
+ * classic menu collapses to an *icon rail*, so its rows drop their labels from
+ * `md` up. The two-level menu never passes it — collapsing there hides the whole
+ * panel and leaves the area rail behind, so its rows are only ever full width.
  */
 
-/** Which collapsible nav parents (e.g. Issues, a cycles-enabled team) are open. */
+/** Which collapsible nav parents (e.g. a cycles-enabled team) are open. */
 const EXPAND_KEY = 'ph_nav_expanded';
 /**
  * Which whole *sections* (Favourites, a nav group, Teams) the user has collapsed,
@@ -37,6 +53,11 @@ const SECTIONS_KEY = 'ph_nav_sections';
  * fall in by their natural `order` until they're dragged.
  */
 const TEAMS_ORDER_KEY = 'ph_nav_team_order';
+/**
+ * Which level-1 area's panel is open. Personal to the browser like the keys
+ * above — the point is that the app reopens in the area you were last working in.
+ */
+const AREA_KEY = 'ph_nav_area';
 
 /**
  * A hover-revealed action on a nav heading or row (`+`, `⋯`). Invisible until its
@@ -54,11 +75,30 @@ export const ACTION =
  * so the whole sidebar reads as one list however a given row behaves.
  */
 export const ROW =
-  'group flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground';
+  'group flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[12px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground';
 
 /** A section label (Product Discovery, Teams…): quiet, Title-Case, gently spaced. */
 export const HEADING =
-  'flex items-center gap-1 px-2 pb-1 pt-0.5 text-xs font-medium text-muted-foreground';
+  'flex items-center gap-1 px-2 pb-1 pt-0.5 text-[11px] font-medium text-muted-foreground';
+
+/**
+ * The hairline that closes off a block of rows (see `NavSection.dividerAfter`).
+ * It pulls back into the nav's `gap-4` rather than adding to it — a rule with a
+ * full gap on each side reads as a hole in the list, not a join.
+ */
+export const NAV_DIVIDER = '-my-1.5 mx-2 border-t border-sidebar-border';
+
+/**
+ * A cell on the sidebar's bottom edge — the rail's collapse toggle, the profile.
+ * `h-12`, the same as the header row at the top and as the doc tree's own
+ * "+ Add page" footer beside it, so the rule above them is one continuous line
+ * across all three columns instead of three heights meeting at a ragged edge.
+ *
+ * The cell fixes the height; whatever sits inside it is sized to fit (the
+ * profile's two-line name block is 30px, so it rides in a 36px trigger).
+ */
+export const NAV_FOOTER_CELL =
+  'flex h-12 shrink-0 items-center border-t border-sidebar-border px-2';
 
 /**
  * Collapsible **parents** (Issues, a cycles-enabled team) — keyed by route, so a
@@ -79,10 +119,19 @@ export function useNavGroups() {
   }, [openGroups]);
 
   const isUnder = (p: string) => pathname === p || pathname.startsWith(`${p}/`);
+  /**
+   * Where a group sits before anyone touches it: open whenever the route is
+   * inside it. A parent row can live at a different URL from the child you're
+   * standing on (My Tasks is `/issues/me`, but Today is `/issues/today`), so the
+   * children count as "inside" too — otherwise the group would close under you.
+   * Both `isOpen` and `toggleGroup` read it, or the first click after landing on
+   * a child would only re-assert what's already on screen and look like a no-op.
+   */
+  const defaultOpen = (p: string, childPaths: string[]) => [p, ...childPaths].some(isUnder);
   return {
-    isOpen: (p: string) => openGroups[p] ?? isUnder(p),
-    toggleGroup: (p: string) =>
-      setOpenGroups((g) => ({ ...g, [p]: !(g[p] ?? isUnder(p)) })),
+    isOpen: (p: string, childPaths: string[] = []) => openGroups[p] ?? defaultOpen(p, childPaths),
+    toggleGroup: (p: string, childPaths: string[] = []) =>
+      setOpenGroups((g) => ({ ...g, [p]: !(g[p] ?? defaultOpen(p, childPaths)) })),
   };
 }
 
@@ -108,6 +157,212 @@ export function useNavSections() {
     toggleSection: (key: string) =>
       setClosedSections((s) => ({ ...s, [key]: !s[key] })),
   };
+}
+
+/**
+ * Which area (level 1) the panel is showing, and how it follows the route.
+ *
+ * The route wins whenever it has an opinion: opening a doc from a link, or
+ * jumping via a breadcrumb, moves the rail with you. `findAreaId` deliberately
+ * returns nothing for routes that belong to no area — the dashboard, `/profile`,
+ * the create pages — and the panel then stays put. That's what makes the
+ * remembered area useful: reloading onto `/` reopens the area you were last in,
+ * so a team board stays one click away instead of two.
+ */
+export function useSelectedArea(routeAreaId: string | undefined, fallbackId: string) {
+  const [selected, setSelected] = useState<string>(
+    () => localStorage.getItem(AREA_KEY) || routeAreaId || fallbackId,
+  );
+  useEffect(() => {
+    localStorage.setItem(AREA_KEY, selected);
+  }, [selected]);
+  useEffect(() => {
+    if (routeAreaId) setSelected(routeAreaId);
+  }, [routeAreaId]);
+  return [selected, setSelected] as const;
+}
+
+/**
+ * How wide the side menu is — dragged by its right edge and remembered per
+ * browser, like every other sidebar preference here. Personal, not an account
+ * field: how much room you give the nav depends on your screen, not your team.
+ *
+ * The hook renders its own handle (`handle`) rather than handing back a bundle
+ * of props: the drag maths, the clamp and the affordance are one thing, and a
+ * menu that could render the handle without wiring the drag is a menu that will.
+ *
+ * `width` is published as a CSS variable rather than an inline `width`, because
+ * only the desktop menu resizes — the mobile drawer and the collapsed rail keep
+ * their own fixed widths, and a media query can't reach an inline style.
+ */
+export function useSidebarWidth({
+  storageKey,
+  initial,
+  min,
+  max,
+}: {
+  storageKey: string;
+  /** Width to fall back to, and what a double-click on the handle restores. */
+  initial: number;
+  min: number;
+  max: number;
+}) {
+  const clamp = (n: number) => Math.min(max, Math.max(min, Math.round(n)));
+  const [width, setWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem(storageKey));
+    // A remembered width from before a bounds change (or another menu's key)
+    // would otherwise pin the menu at a size it no longer offers.
+    return saved ? clamp(saved) : initial;
+  });
+  const [dragging, setDragging] = useState(false);
+  useEffect(() => {
+    localStorage.setItem(storageKey, String(width));
+  }, [storageKey, width]);
+
+  // Undoes whatever the drag did to the page (below), so a menu unmounted
+  // mid-drag — switching menu style from the profile menu — can't strand the
+  // whole document under a resize cursor that nothing will clear.
+  const endDrag = useRef<() => void>();
+  useEffect(() => () => endDrag.current?.(), []);
+
+  const startDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const el = e.currentTarget;
+    const startX = e.clientX;
+    const startWidth = width;
+    // Pointer capture keeps the move events coming to the handle even once the
+    // cursor is out over the page — the alternative is listeners on document
+    // that have to be torn down on a drag that ended off-window.
+    el.setPointerCapture(e.pointerId);
+    setDragging(true);
+
+    // The cursor and the no-select belong to the *page*: the pointer leaves the
+    // 8px handle within a few pixels, and without this the cursor flickers and
+    // the drag selects whatever text it sweeps over. Set here — synchronously,
+    // ahead of the mousedown that would begin a selection — rather than by
+    // preventing the default: `preventDefault` on pointerdown also suppresses
+    // the compatibility mouse events, and with them the dblclick that resets.
+    const { style } = document.body;
+    const prev = { cursor: style.cursor, select: style.userSelect };
+    style.cursor = 'col-resize';
+    style.userSelect = 'none';
+
+    const onMove = (ev: PointerEvent) => setWidth(clamp(startWidth + ev.clientX - startX));
+    const stop = () => {
+      setDragging(false);
+      style.cursor = prev.cursor;
+      style.userSelect = prev.select;
+      el.releasePointerCapture?.(e.pointerId);
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', stop);
+      el.removeEventListener('pointercancel', stop);
+      endDrag.current = undefined;
+    };
+    endDrag.current = stop;
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', stop);
+    el.addEventListener('pointercancel', stop);
+  };
+
+  const handle = (
+    <div
+      // A `separator` with a value is the resize idiom screen readers know, and
+      // it's why the arrow keys below aren't just a nicety — a drag alone would
+      // make the width unreachable without a pointer.
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={t('nav.resize')}
+      aria-valuenow={width}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      tabIndex={0}
+      title={t('nav.resizeHint')}
+      onPointerDown={startDrag}
+      onDoubleClick={() => setWidth(initial)}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 32 : 8;
+        if (e.key === 'ArrowLeft') setWidth((w) => clamp(w - step));
+        else if (e.key === 'ArrowRight') setWidth((w) => clamp(w + step));
+        else if (e.key === 'Home') setWidth(min);
+        else if (e.key === 'End') setWidth(max);
+        else if (e.key === 'Enter') setWidth(initial);
+        else return;
+        e.preventDefault();
+      }}
+      // Straddles the border (`-right-1`) so the grab target is 8px wide while
+      // the line the user aims at stays the menu's own 1px edge. Desktop only:
+      // below md the menu is a drawer at a fixed width.
+      className="group absolute inset-y-0 -right-1 z-20 hidden w-2 cursor-col-resize touch-none outline-none md:block"
+    >
+      <span
+        className={cn(
+          'absolute inset-y-0 left-[3px] w-0.5 rounded-full bg-primary transition-opacity duration-150',
+          dragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100',
+        )}
+        aria-hidden
+      />
+    </div>
+  );
+
+  return { width, dragging, handle };
+}
+
+/**
+ * One stop on the level-1 rail: a glyph, a micro-label under it, and an edge bar
+ * marking the area you're in — readable from the periphery at 68px wide, which a
+ * tinted tile alone isn't.
+ *
+ * It's a link, not a tab: every area has a real landing page, so clicking one
+ * both opens its panel and takes you somewhere. An area that only revealed a
+ * panel would be a control the user has to click twice to get anything from.
+ */
+export function RailButton({
+  area,
+  active,
+  onSelect,
+}: {
+  area: NavArea;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <Link
+      to={area.path}
+      onClick={onSelect}
+      title={t(area.labelKey)}
+      aria-current={active ? 'true' : undefined}
+      className={cn(
+        'group relative flex w-full flex-col items-center gap-1 rounded-lg py-1.5 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring',
+        active ? 'text-primary' : 'text-muted-foreground hover:text-sidebar-accent-foreground',
+      )}
+    >
+      <span
+        className={cn(
+          // Flush with the rail's outer edge: the nav pads by 1, so the bar
+          // steps back by the same 1 to land on x=0.
+          'absolute inset-y-1 -left-1 w-[3px] rounded-r-full bg-primary transition-opacity',
+          active ? 'opacity-100' : 'opacity-0',
+        )}
+        aria-hidden
+      />
+      <span
+        className={cn(
+          'grid size-9 place-items-center rounded-lg transition-colors',
+          active ? 'bg-primary/10' : 'group-hover:bg-sidebar-accent',
+        )}
+      >
+        <Icon name={area.icon} size={20} />
+      </span>
+      <span
+        className={cn(
+          'max-w-full truncate text-[10px] leading-none tracking-tight',
+          active && 'font-semibold',
+        )}
+      >
+        {t(area.labelKey)}
+      </span>
+    </Link>
+  );
 }
 
 /**
@@ -212,78 +467,113 @@ export function NavHeading({
   );
 }
 
+/**
+ * Whether this row is the one you're standing on.
+ *
+ * Decided here rather than left to `NavLink`, which reads the pathname and
+ * nothing else — wrong at three ends:
+ * - a `search` row (Bugs, `/issues?kind=bug`) would light up on plain `/issues`,
+ *   so it lights only while its query is on the URL;
+ * - a plain row on that same pathname (All issues) yields while the query row
+ *   holds it. They used to sit in different panels, where two highlights were
+ *   never on screen together; in one panel they'd be two answers to the same
+ *   question;
+ * - an `alsoAt` row owns URLs `NavLink` never hears about (Roadmaps owns
+ *   `/okrs`, its other tab), so it stays lit across a tab switch instead of
+ *   going dark on a page it is the row for.
+ *
+ * **One value drives both the tint and `aria-current`.** They used to be worked
+ * out separately and drifted: react-router honours the `aria-current` you pass
+ * only while *it* thinks the row is active, so an `alsoAt` row was highlighted
+ * on screen and silent to a screen reader. That's why the row below is a plain
+ * `Link` — nothing is left for `NavLink` to disagree with.
+ */
+function useRowActive(item: NavItem, peers: NavItem[]): boolean {
+  const { pathname, search } = useLocation();
+  // `useMatch` is the matcher `NavLink` uses: with `end` the row owns its path
+  // exactly, without it everything below too (`/issues` covers `/issues/TSK-4`).
+  const onPath = !!useMatch({ path: item.path, end: item.end ?? false });
+  if (item.search !== undefined) return pathname === item.path && searchMatches(search, item.search);
+  if (item.alsoAt?.some((p) => pathname === p || pathname.startsWith(`${p}/`))) return true;
+  return onPath && !queryRowClaims(peers, pathname, search);
+}
+
 /** A single nav row (leaf link). Renders the current user's avatar instead of an
- * icon when `item.avatar` is set — the "Assigned to me" child. The icon rides a
- * shade quieter than its label, catching up to it on hover/active. */
+ * icon when `item.avatar` is set — the "Assigned to me" row. The icon rides a
+ * shade quieter than its label, catching up to it on hover/active.
+ *
+ * `collapsed` is the classic menu's icon rail: the label and badge drop away
+ * from `md` up and the label becomes the tooltip. The two-level menu never
+ * passes it — collapsing there hides the whole panel, so its rows are only ever
+ * drawn at full width. */
 export function NavLeafItem({
   item,
   collapsed,
+  peers = [],
   unseen,
   onNavigate,
 }: {
   item: NavItem;
-  collapsed: boolean;
+  collapsed?: boolean;
+  /** The rows drawn beside this one — see `useRowActive`. */
+  peers?: NavItem[];
   unseen: number;
   onNavigate: () => void;
 }) {
   const { user } = useAuth();
+  const active = useRowActive(item, peers);
+
   return (
-    <NavLink
-      to={item.path}
-      end={item.end}
+    <Link
+      to={item.search ? { pathname: item.path, search: item.search } : item.path}
       onClick={onNavigate}
       title={collapsed ? t(item.labelKey) : undefined}
-      className={({ isActive }) =>
-        cn(
-          ROW,
-          isActive && 'bg-sidebar-accent text-sidebar-accent-foreground',
-          collapsed && 'md:justify-center md:gap-0',
-        )
-      }
-    >
-      {({ isActive }) => (
-        <>
-          <span
-            className={cn(
-              'grid size-5 shrink-0 place-items-center transition-colors',
-              isActive
-                ? 'text-sidebar-accent-foreground'
-                : 'text-muted-foreground group-hover:text-sidebar-accent-foreground',
-            )}
-          >
-            {item.avatar && user ? (
-              <span
-                className="grid size-5 place-items-center rounded-full bg-primary text-[9px] font-semibold text-primary-foreground"
-                aria-hidden
-              >
-                {initials(user.name, user.email)}
-              </span>
-            ) : (
-              <Icon name={item.icon} size={18} />
-            )}
-          </span>
-          <span className={cn('flex-1 truncate', collapsed && 'md:hidden')}>
-            {t(item.labelKey)}
-          </span>
-          {item.badge === 'inbox' && unseen > 0 && (
-            <span
-              className={cn(
-                'ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground',
-                collapsed && 'md:hidden',
-              )}
-            >
-              {unseen}
-            </span>
-          )}
-        </>
+      // Same source as the tint, so what a screen reader is told and what the
+      // eye sees can't disagree.
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        ROW,
+        active && 'bg-sidebar-accent text-sidebar-accent-foreground',
+        collapsed && 'md:justify-center md:gap-0',
       )}
-    </NavLink>
+    >
+      <span
+        className={cn(
+          'grid size-5 shrink-0 place-items-center transition-colors',
+          active
+            ? 'text-sidebar-accent-foreground'
+            : 'text-muted-foreground group-hover:text-sidebar-accent-foreground',
+        )}
+      >
+        {item.avatar && user ? (
+          <span
+            className="grid size-5 place-items-center rounded-full bg-primary text-[9px] font-semibold text-primary-foreground"
+            aria-hidden
+          >
+            {initials(user.name, user.email)}
+          </span>
+        ) : (
+          <Icon name={item.icon} size={18} />
+        )}
+      </span>
+      <span className={cn('flex-1 truncate', collapsed && 'md:hidden')}>{t(item.labelKey)}</span>
+      {item.badge === 'inbox' && unseen > 0 && (
+        <span
+          className={cn(
+            'ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground',
+            collapsed && 'md:hidden',
+          )}
+        >
+          {unseen}
+        </span>
+      )}
+    </Link>
   );
 }
 
-/** A collapsible nav parent (e.g. Issues): the row toggles its children; a
- * rotated chevron shows state. Children hang off a left guide line, the way a
- * space's lists nest. Only rendered when the sidebar is expanded. */
+/** A collapsible nav parent: the row toggles its children; a rotated chevron
+ * shows state. Children hang off a left guide line, the way a space's lists
+ * nest — the one place a third level is allowed. */
 export function NavParentItem({
   item,
   open,
@@ -317,7 +607,6 @@ export function NavParentItem({
             <NavLeafItem
               key={`${c.path}:${c.labelKey}`}
               item={c}
-              collapsed={false}
               unseen={0}
               onNavigate={onNavigate}
             />
@@ -347,10 +636,9 @@ interface RowDrag {
  * so never moves anyone else's. Teams with no saved position (newly added) trail
  * behind in their natural `order`, so the list is always complete.
  *
- * Reorder is an expanded-sidebar action: the collapsed icon rail stays pure
- * navigation, so rows there don't drag. Follows the app's native-DnD idiom
- * (grip cue + drag/over/drop + an insertion line) already used by the test-case
- * table, rather than the heavier board — the right weight for a vertical list.
+ * Follows the app's native-DnD idiom (grip cue + drag/over/drop + an insertion
+ * line) already used by the test-case table, rather than the heavier board — the
+ * right weight for a vertical list.
  */
 export function TeamNavList({
   teams,
@@ -361,7 +649,8 @@ export function TeamNavList({
   onToggle,
 }: {
   teams: TeamDto[];
-  collapsed: boolean;
+  /** Classic menu's icon rail — reorder is an expanded-only action. */
+  collapsed?: boolean;
   pathname: string;
   onNavigate: () => void;
   /** Shared expand-state mechanics (`useNavGroups`) — a cycles-enabled team is a
@@ -424,30 +713,25 @@ export function TeamNavList({
           open={isOpen(`/teams/${team.id}`)}
           onToggleOpen={() => onToggle(`/teams/${team.id}`)}
           onNavigate={onNavigate}
-          // Collapsed rail is pure navigation — no reorder wiring there.
-          drag={
-            collapsed
-              ? undefined
-              : {
-                  dragging: dragId === team.id,
-                  isOver: overId === team.id && dragId !== null && dragId !== team.id,
-                  onDragStart: (e) => {
-                    setDragId(team.id);
-                    e.dataTransfer.effectAllowed = 'move';
-                  },
-                  onDragEnd: stopDrag,
-                  onDragOver: (e) => {
-                    if (!dragId || dragId === team.id) return;
-                    e.preventDefault();
-                    if (overId !== team.id) setOverId(team.id);
-                  },
-                  onDrop: (e) => {
-                    e.preventDefault();
-                    reorder(team.id);
-                    stopDrag();
-                  },
-                }
-          }
+          drag={{
+            dragging: dragId === team.id,
+            isOver: overId === team.id && dragId !== null && dragId !== team.id,
+            onDragStart: (e) => {
+              setDragId(team.id);
+              e.dataTransfer.effectAllowed = 'move';
+            },
+            onDragEnd: stopDrag,
+            onDragOver: (e) => {
+              if (!dragId || dragId === team.id) return;
+              e.preventDefault();
+              if (overId !== team.id) setOverId(team.id);
+            },
+            onDrop: (e) => {
+              e.preventDefault();
+              reorder(team.id);
+              stopDrag();
+            },
+          }}
         />
       ))}
     </>
@@ -457,12 +741,11 @@ export function TeamNavList({
 /**
  * A team in the nav — a workspace "space". The symbol is a picker in place
  * (admin/product only) — so it's a real button and can't live inside the row's
- * <a>; the name is the link instead. Collapsed, the icon is the only hit target,
- * so it stays pure navigation (and doesn't drag).
+ * <a>; the name is the link instead.
  *
- * Expanded, the whole row is a drag source (`drag`) so the current user can
- * reorder the sidebar; the inner links are `draggable={false}` so grabbing a name
- * drags the row rather than the link's URL, while a plain click still navigates.
+ * The whole row is a drag source (`drag`) so the current user can reorder the
+ * sidebar; the inner links are `draggable={false}` so grabbing a name drags the
+ * row rather than the link's URL, while a plain click still navigates.
  */
 function TeamNavItem({
   team,
@@ -474,7 +757,7 @@ function TeamNavItem({
   drag,
 }: {
   team: TeamDto;
-  collapsed: boolean;
+  collapsed?: boolean;
   active: boolean;
   open: boolean;
   onToggleOpen: () => void;
@@ -487,7 +770,8 @@ function TeamNavItem({
   const { search } = useLocation();
   const cycleQ = active ? new URLSearchParams(search).get('cycle') : null;
 
-  // Collapsed rail: icon-only navigation, no picker, no reorder.
+  // Classic menu's collapsed rail: icon-only navigation, no picker, no reorder,
+  // so it stays pure navigation (and doesn't drag).
   if (collapsed) {
     return (
       <NavLink
@@ -620,7 +904,7 @@ function TeamNavItem({
 function favouriteIcon(fav: FavouriteDto): IconName {
   if (fav.kind === FavouriteKind.ROADMAP_ITEM) return 'roadmap';
   // The same glyph the Docs nav item uses, so a pinned doc reads as a doc.
-  if (fav.kind === FavouriteKind.DOC) return 'book';
+  if (fav.kind === FavouriteKind.DOC) return 'docs';
   return fav.issueKind === 'bug' ? 'bug' : 'tasks';
 }
 
@@ -642,9 +926,8 @@ function favouriteHref(fav: FavouriteDto): string {
 }
 
 /**
- * One pinned entity in the sidebar. Expanded, it's an icon + title with a hover
- * "unpin" (×) — the symbol is a real button, so like a team row the label is a
- * separate <Link>. Collapsed, the icon alone links and the unpin is suppressed.
+ * One pinned entity in the sidebar: an icon + title with a hover "unpin" (×) —
+ * the symbol is a real button, so like a team row the label is a separate <Link>.
  */
 export function FavouriteNavItem({
   fav,
@@ -652,7 +935,8 @@ export function FavouriteNavItem({
   onNavigate,
 }: {
   fav: FavouriteDto;
-  collapsed: boolean;
+  /** Classic menu's icon rail: the icon alone links, and unpin is suppressed. */
+  collapsed?: boolean;
   onNavigate: () => void;
 }) {
   const remove = useRemoveFavourite();
@@ -697,6 +981,135 @@ export function FavouriteNavItem({
       >
         <X className="size-3.5" aria-hidden />
       </button>
+    </div>
+  );
+}
+
+/** A saved view's icon — its own, falling back to the board's double-tick glyph.
+ *  `SavedViewDto.icon` has no picker in the save dialog yet, so it's almost
+ *  always `''`; an unrecognised name is harmless (the glyph just renders
+ *  empty), so this doesn't validate against `IconName`. Exported (and kept
+ *  pure) so it's unit-testable without a render harness. */
+export function savedViewIcon(view: SavedViewDto): IconName {
+  return (view.icon || 'checks') as IconName;
+}
+
+/**
+ * Whether the live URL is standing on this exact saved view. Every view's row
+ * points at the same pathname (`/issues`), so — unlike a plain nav link — the
+ * `sv` query param is the only thing that tells two rows apart; a `NavLink`'s
+ * default pathname-only match would light every row at once. Pure and
+ * exported for the same reason as `savedViewIcon`.
+ */
+export function isSavedViewActive(pathname: string, search: string, viewId: string): boolean {
+  return pathname === '/issues' && new URLSearchParams(search).get('sv') === viewId;
+}
+
+/**
+ * Whether *this* viewer's row should offer the delete action — mirrors the
+ * backend's own gate (`canMutateSavedView` in
+ * `saved-view.use-cases.ts`: owner or admin, no other exception) exactly, so
+ * the button is only ever shown where clicking it would succeed. A shared
+ * view's row, opened by someone who isn't its owner and isn't an admin, never
+ * gets the button — showing it there would just be a 403 on click. Pure and
+ * exported for the same reason as `savedViewIcon`/`isSavedViewActive`: this
+ * project doesn't render-test components, so the one thing worth getting
+ * wrong here (the permission check) has to be unit-testable on its own.
+ */
+export function canDeleteSavedView(
+  view: Pick<SavedViewDto, 'ownerId'>,
+  actor: { id?: string; isAdmin: boolean },
+): boolean {
+  return view.ownerId === actor.id || actor.isAdmin;
+}
+
+/**
+ * One saved view in the sidebar — a shortcut to the Issues board pre-filtered
+ * by it (`/issues?sv=<id>`, applied by `IssuesPage`). Saved views are per-user
+ * but can be shared, and the list the API returns already reflects that (own +
+ * shared) — this row never filters by ownership, it only marks a shared one
+ * with a small people glyph so it reads as "not just mine".
+ *
+ * Active state is worked out by hand rather than left to `NavLink`: every row
+ * shares the same pathname (`/issues`), so only the `sv` query param tells two
+ * views apart — the same reasoning as `useRowActive` for a `search` row.
+ */
+export function SavedViewNavItem({
+  view,
+  collapsed,
+  onNavigate,
+}: {
+  view: SavedViewDto;
+  /** Classic menu's icon rail. */
+  collapsed?: boolean;
+  onNavigate: () => void;
+}) {
+  const { pathname, search } = useLocation();
+  const { user, isAdmin } = useAuth();
+  const remove = useDeleteSavedView();
+  const active = isSavedViewActive(pathname, search, view.id);
+  const canDelete = !collapsed && canDeleteSavedView(view, { id: user?.id, isAdmin });
+
+  if (collapsed) {
+    return (
+      <Link
+        to={{ pathname: '/issues', search: `?sv=${view.id}` }}
+        onClick={onNavigate}
+        title={view.name}
+        aria-current={active ? 'page' : undefined}
+        className={cn(
+          ROW,
+          active && 'bg-sidebar-accent text-sidebar-accent-foreground',
+          'md:justify-center md:gap-0',
+        )}
+      >
+        <span
+          className={cn(
+            'grid size-5 shrink-0 place-items-center transition-colors',
+            active
+              ? 'text-sidebar-accent-foreground'
+              : 'text-muted-foreground group-hover:text-sidebar-accent-foreground',
+          )}
+        >
+          <Icon name={savedViewIcon(view)} size={18} />
+        </span>
+      </Link>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        ROW,
+        'group/sv',
+        active && 'bg-sidebar-accent text-sidebar-accent-foreground',
+      )}
+    >
+      <span className="grid size-5 shrink-0 place-items-center">
+        <Icon name={savedViewIcon(view)} size={18} />
+      </span>
+      <Link
+        to={{ pathname: '/issues', search: `?sv=${view.id}` }}
+        onClick={onNavigate}
+        aria-current={active ? 'page' : undefined}
+        className="flex min-w-0 flex-1 items-center gap-1"
+      >
+        <span className="min-w-0 flex-1 truncate">{view.name}</span>
+        {view.shared && (
+          <Icon name="people" className="size-3 shrink-0 text-muted-foreground" />
+        )}
+      </Link>
+      {canDelete && (
+        <button
+          type="button"
+          onClick={() => remove.mutate(view.id)}
+          title={t('savedViews.delete')}
+          aria-label={t('savedViews.delete')}
+          className={cn(ACTION, 'group-hover/sv:opacity-100')}
+        >
+          <X className="size-3.5" aria-hidden />
+        </button>
+      )}
     </div>
   );
 }

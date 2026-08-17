@@ -1,5 +1,6 @@
 import { CycleRollup } from '@application/cycles/domain/enums/cycle.enums';
 import { BurndownIssueRow } from '@application/cycles/domain/cycle-burndown';
+import type { BugStatDimension, RawBugStats } from '@application/mcp/domain/mcp-bug-stats';
 import { IssueEntity } from '../domain/entities/issue.entity';
 import { QueryIssueDto } from '../dtos/query-issue.dto';
 
@@ -9,6 +10,14 @@ export interface IssuePaginationResponse {
   page: number;
   limit: number;
   totalPages: number;
+}
+
+/** One issue swept out of a completed cycle by {@link IIssueRepository.moveUnfinishedIssues}. */
+export interface MovedIssue {
+  id: string;
+  shortId: string;
+  fromCycleId: string;
+  toCycleId: string;
 }
 
 /** Port for issue persistence (the unified tasks+bugs store). All reads are
@@ -31,6 +40,15 @@ export abstract class IIssueRepository {
     opts?: { personalOwnerId?: string },
   ) => Promise<IssuePaginationResponse>;
   countByStatus: (tenantId: string, status: string) => Promise<number>;
+  /** Count every issue whose parent is `parentId`, regardless of owner — the
+   *  privacy filter on `findByTenant` hides personal-task children, but the
+   *  delete-orphan guard must see them too, or it would orphan a private subtask. */
+  countChildren: (tenantId: string, parentId: string) => Promise<number>;
+  /** Every issue whose parent is `parentId`, regardless of owner — same
+   *  no-ownerId scoping as `countChildren` (privacy filtering, if any, is the
+   *  caller's job: e.g. Task 17's related-history assembly runs each child
+   *  through its own `isVisibleTo` guard before using it). */
+  findChildren: (tenantId: string, parentId: string) => Promise<IssueEntity[]>;
   /** Scope/completed (count + points) per cycle id, in one aggregation. Feeds
    *  both the live rollups and the freeze at cycle completion. */
   cycleRollups: (
@@ -48,15 +66,30 @@ export abstract class IIssueRepository {
     extraIds: string[],
   ) => Promise<BurndownIssueRow[]>;
   /** Sweep unfinished issues out of completed cycles into `toCycleId` (auto-
-   *  rollover) or '' (back to no-cycle). Idempotent; returns how many moved. */
+   *  rollover) or '' (back to no-cycle). Idempotent; returns the issues moved
+   *  (with the cycle each came from), so the caller can log the rollover. */
   moveUnfinishedIssues: (
     tenantId: string,
     fromCycleIds: string[],
     toCycleId: string,
     completedStatusKeys: string[],
-  ) => Promise<number>;
-  /** Detach every issue pointing at these cycles (deleted upcoming cycles). */
-  clearCycleIds: (tenantId: string, cycleIds: string[]) => Promise<number>;
+  ) => Promise<MovedIssue[]>;
+  /** Detach every issue pointing at these cycles (deleted upcoming cycles).
+   *  Returns the issues detached (with the cycle each came from), so the caller
+   *  can log it — same contract as {@link moveUnfinishedIssues}, because an
+   *  issue leaving a cycle by an admin action deserves the same row as one
+   *  leaving it by rollover. */
+  clearCycleIds: (tenantId: string, cycleIds: string[]) => Promise<MovedIssue[]>;
+  /** Phân bố bug, gom nhóm nhiều chiều trong một lần aggregation. Chỉ chiều
+   *  được xin mới dựng vào `$facet`. `trend` thêm hai nhánh mở/đóng theo mốc
+   *  thời gian; bỏ trống thì không tính. Trả về hàng thô — mọi luật về trần và
+   *  ô rỗng nằm ở `application/mcp/domain/mcp-bug-stats.ts`. */
+  bugStats: (
+    tenantId: string,
+    filter: { teamId?: string; since?: Date; until?: Date },
+    dimensions: BugStatDimension[],
+    trend?: { unit: 'week' | 'month'; timezone: string },
+  ) => Promise<RawBugStats>;
   save: (issue: IssueEntity) => Promise<void>;
   update: (issue: IssueEntity) => Promise<void>;
   delete: (id: string) => Promise<void>;

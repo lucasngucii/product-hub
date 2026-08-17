@@ -1,5 +1,6 @@
 import { makeIssueHooks } from '@/features/issues/hook-factory';
 import { IssueKind } from '@/types/enums';
+import type { IssueSortDir, IssueSortField } from '@/features/issues/api';
 import type { BugAttachment, BugDto } from '@/types/dto';
 import type { BugSeverity, BugStatus, CustomFieldValue } from '@/types/enums';
 
@@ -19,6 +20,8 @@ export interface BugQuery {
   status?: BugStatus[];
   severity?: BugSeverity[];
   assigneeId?: string[];
+  /** Who opened the bug — user id(s). */
+  createdBy?: string[];
   projectId?: string[];
   /** Team cycle: a cycle id, or `current` / `upcoming` / `none` — the sentinels
    *  resolve server-side against `teamId`, so saved links never go stale. */
@@ -26,6 +29,20 @@ export interface BugQuery {
   caseId?: string;
   reportId?: string;
   search?: string;
+  /** Opened on/after this instant (or `YYYY-MM-DD`, read as that UTC day). */
+  createdFrom?: string;
+  /** Opened on/before this instant — inclusive. */
+  createdTo?: string;
+  /** Solved (moved to resolved/closed) on/after this instant. Still-open bugs
+   *  have no solved date, so either end on its own also excludes them. */
+  resolvedFrom?: string;
+  /** Solved on/before this instant — inclusive. */
+  resolvedTo?: string;
+  /** Sort field. Omit to keep the board ordering (drag position, then newest first) —
+   *  the kanban view must always omit it. */
+  sort?: IssueSortField;
+  /** Sort direction; defaults to `desc` server-side. */
+  dir?: IssueSortDir;
 }
 
 export interface CreateBugInput {
@@ -39,6 +56,8 @@ export interface CreateBugInput {
   caseId?: string;
   caseLabel?: string;
   reportId?: string;
+  /** Everyone on it, primary first (`[]` unassigns); wins over `assigneeId`. */
+  assigneeIds?: string[];
   assigneeId?: string;
   /** Start of the work window, ISO `YYYY-MM-DD`. */
   startDate?: string;
@@ -64,6 +83,8 @@ export interface UpdateBugInput {
   caseId?: string;
   caseLabel?: string;
   reportId?: string;
+  /** Everyone on it, primary first (`[]` unassigns); wins over `assigneeId`. */
+  assigneeIds?: string[];
   assigneeId?: string;
   /** Commit to a team cycle ('' leaves it; only the bug's own team's
    *  current/upcoming cycles are accepted server-side). */

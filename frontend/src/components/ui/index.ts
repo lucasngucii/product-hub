@@ -18,7 +18,8 @@ export {
 } from './DateRangePicker';
 export { RichTextEditor, type RichTextEditorProps } from './RichTextEditor';
 export { RichText, type RichTextProps } from './RichText';
-export { useLightbox, type LightboxImage } from './Lightbox';
+export { useLightbox, collectImages, type LightboxImage } from './Lightbox';
+export { useImageZoom } from './ImageZoom';
 export { useExternalLink, type ExternalLinkGuard } from './ExternalLink';
 export { MultiSelect, type MultiSelectOption, type MultiSelectProps } from './MultiSelect';
 export { TagInput, type TagInputProps } from './TagInput';
@@ -35,7 +36,7 @@ export { Dialog } from './Dialog';
 export { Drawer } from './Drawer';
 export { Spinner } from './Spinner';
 export { ProgressBar } from './ProgressBar';
-export { Menu, type MenuItem } from './Menu';
+export { Menu, ContextMenu, type MenuItem } from './Menu';
 
 // shadcn/ui components
 export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent } from './card';

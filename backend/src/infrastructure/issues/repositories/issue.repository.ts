@@ -1,19 +1,171 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { FilterQuery, Model } from 'mongoose';
+import { FilterQuery, Model, PipelineStage } from 'mongoose';
 import { UniqueEntityID } from '@core/domain';
 import { BaseRepository } from '@core/infrastructure/database/mongoose/base';
 import { resolveAssignees } from '@module-shared/utils/query-array.util';
+import { dateRangeFilter } from '@module-shared/utils/date-range.util';
+import { buildSearchText, normalizeSearchText } from '@module-shared/utils/search-text.util';
+import { escapeRegex } from '@infrastructure/search/search-query.util';
 import { CycleRollup } from '@application/cycles/domain/enums/cycle.enums';
 import { BurndownIssueRow } from '@application/cycles/domain/cycle-burndown';
 import {
   IssuePaginationResponse,
   IIssueRepository,
+  MovedIssue,
 } from '@application/issues/repositories/issue.repository';
 import { IssueEntity } from '@application/issues/domain/entities/issue.entity';
-import { BugSeverity, IssueKind } from '@application/issues/domain/enums/issue.enums';
-import { QueryIssueDto } from '@application/issues/dtos/query-issue.dto';
+import {
+  BUG_SEVERITIES,
+  BugSeverity,
+  IssueKind,
+} from '@application/issues/domain/enums/issue.enums';
+import {
+  IssueSortDir,
+  IssueSortField,
+  QueryIssueDto,
+} from '@application/issues/dtos/query-issue.dto';
+import {
+  BugStatDimension,
+  RawBucket,
+  RawBugStats,
+  RawTrendRow,
+} from '@application/mcp/domain/mcp-bug-stats';
 import { IssueDoc } from '../entities/issue.schema';
+
+/**
+ * Field the severity rank is computed into. Prefixed like `EXACT_RANK_FIELD` so it
+ * can never collide with a real document key, and projected away before the docs
+ * are mapped.
+ */
+export const SEVERITY_RANK_FIELD = '__severityRank';
+
+/**
+ * Position on the bug scale: `low` 0 … `critical` 3, and **-1** for anything not
+ * on it — every task, and any bug stored before severity was required. The -1 is
+ * `$indexOfArray`'s own "not found", not a value we write, and it is what keeps
+ * severity-less rows in one block (below `low` ascending, at the bottom
+ * descending) instead of scattered through the list.
+ */
+export const severityRankExpr = { $indexOfArray: [BUG_SEVERITIES, '$severity'] };
+
+/**
+ * Whether this request's sort key has to be computed per row, which `find()`
+ * cannot sort on — the one thing that decides between `find()` and the
+ * aggregation path, alongside the exact-ref rank.
+ */
+export function needsSeverityRank(sort?: IssueSortField): boolean {
+  return sort === 'severity';
+}
+
+/**
+ * The Mongo sort for a list request.
+ *
+ * With no `sort` this is exactly the historical `{order: 1, createdAt: -1}` — the
+ * board and every caller written before sorting existed depend on it byte for
+ * byte.
+ *
+ * With an explicit sort, `order` is **dropped**. It is the drag position *within a
+ * status column* (`IssueProps.order`), it leads the sort, and issues carry
+ * distinct values — leaving it in would make a sort control that visibly does
+ * nothing.
+ *
+ * The ID sort is `refPrefix` then `refSeq`, both indexed. Issues created before
+ * sequential refs have neither field; Mongo sorts a missing field as null, which
+ * orders before every string, so those rows form one block (at the top ascending,
+ * at the bottom descending) with `createdAt` ordering them inside it. Nothing is
+ * ever written to them to achieve this.
+ *
+ * The severity sort orders by `SEVERITY_RANK_FIELD` (see `severityRankExpr`), not
+ * by the stored value: `severity` is a string, so Mongo would order it
+ * alphabetically — critical, high, low, medium — which is not the scale anyone
+ * means by "sort by severity".
+ *
+ * Every explicit sort ends in `_id`, which is the only field guaranteed unique,
+ * so the order is *total*. Without it the legacy block is ordered by `createdAt`
+ * alone, and the historical `migrate-issues` script bulk-created rows that share a
+ * `createdAt` to the millisecond — ties Mongo may break differently between two
+ * pages of the same list, which shows one row twice and skips another. The same
+ * exposure exists for the `created`/`updated` sorts, so they get the tiebreak too.
+ */
+export function issueSortStage(
+  sort?: IssueSortField,
+  dir?: IssueSortDir,
+): Record<string, 1 | -1> {
+  // The no-sort branch stays byte-for-byte historical — no `_id` tiebreak here,
+  // because every caller written before sorting existed depends on this shape.
+  if (!sort) return { order: 1, createdAt: -1 };
+  const d: 1 | -1 = dir === 'asc' ? 1 : -1;
+  if (sort === 'created') return { createdAt: d, _id: d };
+  if (sort === 'updated') return { updatedAt: d, _id: d };
+  // Descending — the default, and what this sort is for: worst first, with the
+  // severity-less block (rank -1) at the bottom.
+  if (sort === 'severity') return { [SEVERITY_RANK_FIELD]: d, createdAt: d, _id: d };
+  return { refPrefix: d, refSeq: d, createdAt: d, _id: d };
+}
+
+/**
+ * A search box entry that *is* a ticket ref (`ENG-14`, `eng-14`), upper-cased to
+ * the casing refs are stored in — or null when the text is anything else.
+ *
+ * Typing a known ref is the single most common reason anyone searches, and the
+ * substring regex buries it: with sequential refs, `ENG-1` also matches `ENG-10`,
+ * `ENG-19`, `ENG-100`… all of which sort ahead of it under the board's default
+ * order. This is the signal used to float the one exact row to the top.
+ *
+ * Deliberately narrow. Only a `PREFIX-digits` shape qualifies, so ordinary text
+ * searches take the untouched code path and cannot be affected at all.
+ */
+export const ISSUE_REF_SEARCH_RE = /^[A-Za-z][A-Za-z0-9]{0,9}-\d+$/;
+
+export function exactRefSearch(search?: string): string | null {
+  if (!search) return null;
+  const text = search.trim();
+  return ISSUE_REF_SEARCH_RE.test(text) ? text.toUpperCase() : null;
+}
+
+/**
+ * Field the exact-match rank is computed into. Prefixed so it can never collide
+ * with a real document key, and projected away before the docs are mapped.
+ */
+export const EXACT_RANK_FIELD = '__exactRefRank';
+
+/**
+ * Whether this list request should float an exact `shortId` match to the top.
+ *
+ * Only when the text is ref-shaped **and the user did not choose a sort**. An
+ * explicit sort wins: someone who clicked "ID ascending" or "recently updated"
+ * asked for a specific order, and silently pinning a row above it makes the
+ * control look broken and the column headers lie. With no sort chosen there is no
+ * user intent to override — the default `{order, createdAt}` is the board's own
+ * arrangement, and "the thing you typed the id of" is a better first row than it.
+ */
+export function shouldRankExactRefFirst(
+  exactRef: string | null,
+  sort?: IssueSortField,
+): boolean {
+  return !!exactRef && !sort;
+}
+
+/**
+ * Các nhánh $or cho một chuỗi trong ô tìm kiếm của board.
+ *
+ * `searchText` là nhánh chính: nó đã bỏ dấu nên "dang nh" khớp "Đăng nhập" —
+ * cùng hành vi với ⌘K, vốn là điều kiện để hai ô tìm kiếm không mâu thuẫn nhau.
+ * `description` giữ regex thô (không chuẩn hoá) vì nó không có bản chuẩn hoá;
+ * `_id` giữ lại cho link cũ dán vào ô tìm kiếm. `title`/`shortId` không còn là
+ * nhánh riêng — cả hai đã nằm trong `searchText` (xem `buildSearchText`), nên
+ * gộp vào đó là mất nhánh thừa, không phải mất bề mặt tìm kiếm.
+ *
+ * ⚠️ Chỉ tìm đúng trên document đã có `searchText` (ghi mới hoặc đã backfill —
+ * Task 6). Document cũ chưa backfill có `searchText` rỗng và sẽ không khớp qua
+ * nhánh này nữa dù `title` của nó chứa từ khoá.
+ */
+export function buildIssueTextFilter(search: string) {
+  const raw = new RegExp(escapeRegex(search), 'i');
+  const norm = new RegExp(escapeRegex(normalizeSearchText(search)), 'i');
+  return [{ searchText: norm }, { description: raw }, { _id: raw }];
+}
 
 @Injectable()
 export class IssueRepository
@@ -33,6 +185,10 @@ export class IssueRepository
         ownerId: doc.ownerId,
         parentId: doc.parentId,
         shortId: doc.shortId,
+        // Absent on a legacy row and left that way — never defaulted, so the
+        // entity reads back `undefined` and toDocument re-emits nothing.
+        refPrefix: doc.refPrefix,
+        refSeq: doc.refSeq,
         title: doc.title,
         description: doc.description,
         status: doc.status,
@@ -42,6 +198,9 @@ export class IssueRepository
         projectId: doc.projectId,
         cycleId: doc.cycleId,
         carryOverCount: doc.carryOverCount,
+        // A pre-multi-assign row has no `assignees`; the entity reads its single
+        // `assigneeId`/`assigneeName` as a one-person list, so it loads unchanged.
+        assignees: doc.assignees?.length ? doc.assignees : undefined,
         assigneeId: doc.assigneeId,
         assigneeName: doc.assigneeName,
         createdBy: doc.createdBy,
@@ -63,6 +222,10 @@ export class IssueRepository
         order: doc.order,
         createdAt: doc.createdAt,
         updatedAt: doc.updatedAt,
+        // Always passed explicitly (never left undefined): that's how the entity
+        // tells a stored row from a brand-new issue and so doesn't stamp an old
+        // already-resolved bug with today's date on load — see IssueEntity.create.
+        resolvedAt: doc.resolvedAt ?? null,
       },
       new UniqueEntityID(doc._id),
     );
@@ -79,6 +242,10 @@ export class IssueRepository
       ownerId: issue.ownerId,
       parentId: issue.parentId,
       shortId: issue.shortId,
+      // `undefined` for a legacy issue — Mongoose omits undefined keys, so a save
+      // never creates these fields on a row that didn't have them.
+      refPrefix: issue.refPrefix,
+      refSeq: issue.refSeq,
       title: issue.title,
       description: issue.description,
       status: issue.status,
@@ -88,6 +255,7 @@ export class IssueRepository
       projectId: issue.projectId,
       cycleId: issue.cycleId,
       carryOverCount: issue.carryOverCount,
+      assignees: issue.assignees,
       assigneeId: issue.assigneeId,
       assigneeName: issue.assigneeName,
       createdBy: issue.createdBy,
@@ -109,6 +277,8 @@ export class IssueRepository
       order: issue.order,
       createdAt: issue.createdAt,
       updatedAt: issue.updatedAt,
+      resolvedAt: issue.resolvedAt,
+      searchText: buildSearchText(issue.title, issue.shortId),
     };
   }
 
@@ -119,8 +289,19 @@ export class IssueRepository
 
   async findByRef(tenantId: string, ref: string): Promise<IssueEntity | null> {
     // shortId first (the URL-facing id), then uuid for pre-shortId links.
+    //
+    // The shortId lookup is upper-cased because refs are minted and stored upper
+    // case but are now typed by hand: `ENG-14` is short enough to retype from a
+    // chat message or a whiteboard, unlike the random `BUG-ESP4F4T` refs that
+    // came before it. The commit-message parser already accepts any casing, so
+    // resolving `eng-14` in a URL keeps the two entry points consistent — without
+    // it, the same ref links from a commit but 404s in the address bar. The uuid
+    // fallback stays exact: uuids are lower case and never retyped.
     const doc =
-      (await this.model.findOne({ tenantId, shortId: ref }).lean<IssueDoc>().exec()) ??
+      (await this.model
+        .findOne({ tenantId, shortId: ref.toUpperCase() })
+        .lean<IssueDoc>()
+        .exec()) ??
       (await this.model.findOne({ tenantId, _id: ref }).lean<IssueDoc>().exec());
     return doc ? this.toDomain(doc) : null;
   }
@@ -171,26 +352,46 @@ export class IssueRepository
     if (query.ids?.length) filter._id = { $in: query.ids };
     if (query.status?.length) filter.status = { $in: query.status };
     if (query.severity?.length) filter.severity = { $in: query.severity };
-    if (query.assigneeId?.length) filter.assigneeId = { $in: resolveAssignees(query.assigneeId) };
     if (query.parentId?.length) filter.parentId = { $in: query.parentId };
     if (query.roadmapItemId?.length) filter.roadmapItemId = { $in: query.roadmapItemId };
     if (query.roadmapId?.length) filter.roadmapId = { $in: query.roadmapId };
     if (query.projectId?.length) filter.projectId = { $in: query.projectId };
+    // Who opened it. `createdBy` is set on every issue (a bug also mirrors it into
+    // `reporterId`), so one filter serves both kinds.
+    if (query.createdBy?.length) filter.createdBy = { $in: query.createdBy };
     if (query.teamId) filter.teamId = query.teamId;
     // '' is meaningful here (issues in no cycle) — sentinels like `current` were
     // already resolved to a real id (or a no-match id) by the use-case.
     if (query.cycleId !== undefined) filter.cycleId = query.cycleId;
     if (query.caseId) filter.caseId = query.caseId;
     if (query.reportId) filter.reportId = query.reportId;
-    // "Assigned to me": strictly the issues assigned to me — this wins over any
-    // explicit assignee filter, so it's set after the assigneeId clause above.
-    if (query.mine) filter.assigneeId = query.mine;
+    // Date windows. `resolvedAt` is null on anything still open, and null never
+    // satisfies a $gte/$lte — so a solved-date filter narrows to solved issues
+    // on its own, which is exactly what "solved between these dates" means.
+    const created = dateRangeFilter(query.createdFrom, query.createdTo);
+    if (created) filter.createdAt = created;
+    const resolved = dateRangeFilter(query.resolvedFrom, query.resolvedTo);
+    if (resolved) filter.resolvedAt = resolved;
+    // Assignee match. An issue counts as someone's when they are *any* of its
+    // assignees, not only the primary — that's what multi-assign means for "my
+    // work". Both halves are required: an issue written before multi-assign has
+    // the `assigneeId` mirror and an empty `assignees`, so neither clause alone
+    // covers the whole collection. Unassigned arrives as '' (from the sentinel)
+    // and matches the mirror, which is '' exactly when the list is empty.
+    // "Assigned to me" wins over an explicit assignee filter, as it did before.
+    const wantedAssignees = query.mine
+      ? [query.mine]
+      : query.assigneeId?.length
+        ? resolveAssignees(query.assigneeId)
+        : null;
+    if (wantedAssignees) {
+      filter.$or = [
+        { assigneeId: { $in: wantedAssignees } },
+        { 'assignees.id': { $in: wantedAssignees } },
+      ];
+    }
     if (query.search) {
-      // Escaped: free text from a search box would otherwise throw on `(`.
-      const escaped = query.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp(escaped, 'i');
-      // Name or id — the picker accepts a pasted id (`_id` is a uuid string).
-      const searchOr = [{ title: re }, { description: re }, { _id: re }, { shortId: re }];
+      const searchOr = buildIssueTextFilter(query.search);
       if (filter.$or) {
         filter.$and = [{ $or: filter.$or }, { $or: searchOr }];
         delete filter.$or;
@@ -199,14 +400,48 @@ export class IssueRepository
       }
     }
 
+    // Two orderings need a key that isn't stored on the document: the exact-ref
+    // rank (searching a full ref puts that ticket first — see
+    // `shouldRankExactRefFirst`) and the severity rank (the bug scale, not the
+    // alphabet — see `severityRankExpr`). `find()` cannot sort on a computed
+    // field, so those cases run as an aggregation; everything else keeps the
+    // original `find()` untouched. The matched set is identical either way, only
+    // the order differs. The two never combine — an explicit sort turns the
+    // exact-ref rank off — but each adds only its own field, so the pipeline is
+    // written once for both.
+    const exactRef = exactRefSearch(query.search);
+    const rankExactFirst = shouldRankExactRefFirst(exactRef, query.sort);
+    const rankSeverity = needsSeverityRank(query.sort);
+    const sortStage = issueSortStage(query.sort, query.dir);
+    const computed: Record<string, unknown> = {
+      // 0 for the exact ref, 1 for everything else — ascending, so the one row
+      // the user typed the id of leads and the rest keep the order they had.
+      ...(rankExactFirst ? { [EXACT_RANK_FIELD]: { $cond: [{ $eq: ['$shortId', exactRef] }, 0, 1] } } : {}),
+      ...(rankSeverity ? { [SEVERITY_RANK_FIELD]: severityRankExpr } : {}),
+    };
+
     const [docs, total] = await Promise.all([
-      this.model
-        .find(filter)
-        .sort({ order: 1, createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .lean<IssueDoc[]>()
-        .exec(),
+      rankExactFirst || rankSeverity
+        ? this.model
+            .aggregate<IssueDoc>([
+              { $match: filter as FilterQuery<IssueDoc> },
+              { $addFields: computed },
+              { $sort: rankExactFirst ? { [EXACT_RANK_FIELD]: 1, ...sortStage } : sortStage },
+              { $skip: (page - 1) * limit },
+              { $limit: limit },
+              // Drop both ranks unconditionally — projecting a field the pipeline
+              // never added is a no-op, and it keeps the doc shape identical to
+              // the `find()` branch's.
+              { $project: { [EXACT_RANK_FIELD]: 0, [SEVERITY_RANK_FIELD]: 0 } },
+            ])
+            .exec()
+        : this.model
+            .find(filter)
+            .sort(sortStage)
+            .skip((page - 1) * limit)
+            .limit(limit)
+            .lean<IssueDoc[]>()
+            .exec(),
       this.model.countDocuments(filter).exec(),
     ]);
 
@@ -221,6 +456,23 @@ export class IssueRepository
 
   async countByStatus(tenantId: string, status: string): Promise<number> {
     return this.model.countDocuments({ tenantId, status }).exec();
+  }
+
+  async countChildren(tenantId: string, parentId: string): Promise<number> {
+    // No ownerId scoping on purpose — the orphan guard must count personal-task
+    // children too, which the privacy-filtered `findByTenant` would hide.
+    return this.model.countDocuments({ tenantId, parentId }).exec();
+  }
+
+  async findChildren(tenantId: string, parentId: string): Promise<IssueEntity[]> {
+    // No ownerId scoping — same reasoning as countChildren. Callers that care
+    // about per-child visibility (e.g. the related-history assembly in
+    // GetActivityUseCase) run each result through its own `isVisibleTo` guard.
+    const docs = await this.model
+      .find({ tenantId, parentId })
+      .lean<IssueDoc[]>()
+      .exec();
+    return docs.map((d) => this.toDomain(d));
   }
 
   async cycleRollups(
@@ -293,6 +545,7 @@ export class IssueRepository
           updatedAt: 1,
           status: 1,
           estimate: 1,
+          assignees: 1,
           assigneeId: 1,
           assigneeName: 1,
           labelKeys: 1,
@@ -306,6 +559,7 @@ export class IssueRepository
           | 'updatedAt'
           | 'status'
           | 'estimate'
+          | 'assignees'
           | 'assigneeId'
           | 'assigneeName'
           | 'labelKeys'
@@ -318,11 +572,129 @@ export class IssueRepository
       updatedAt: d.updatedAt,
       status: d.status,
       estimate: d.estimate ?? 0,
-      assigneeId: d.assigneeId ?? '',
-      assigneeName: d.assigneeName ?? '',
+      // Every person on it, so the per-assignee breakdown counts a shared issue
+      // for each of them. A pre-multi-assign row falls back to its mirror.
+      assignees: d.assignees?.length
+        ? d.assignees.map((a) => ({ id: a.id ?? '', name: a.name ?? '' }))
+        : d.assigneeId
+          ? [{ id: d.assigneeId, name: d.assigneeName ?? '' }]
+          : [],
       labelKeys: d.labelKeys ?? [],
       projectId: d.projectId ?? '',
     }));
+  }
+
+  async bugStats(
+    tenantId: string,
+    filter: { teamId?: string; since?: Date; until?: Date },
+    dimensions: BugStatDimension[],
+    trend?: { unit: 'week' | 'month'; timezone: string },
+  ): Promise<RawBugStats> {
+    const match: FilterQuery<IssueDoc> = { tenantId, kind: IssueKind.BUG };
+    if (filter.teamId) match.teamId = filter.teamId;
+    if (filter.since || filter.until) {
+      match.createdAt = {};
+      if (filter.since) (match.createdAt as Record<string, Date>).$gte = filter.since;
+      if (filter.until) (match.createdAt as Record<string, Date>).$lte = filter.until;
+    }
+
+    // Mỗi chiều một nhánh $facet — một vòng tới DB thay vì sáu.
+    const facet: Record<string, object[]> = { total: [{ $count: 'n' }] };
+
+    // Chiều vô hướng: gom thẳng. `$ifNull` để giá trị thiếu thành '' — cùng một ô
+    // rỗng với hàng đã lưu '' sẵn (schema mặc định '' chứ không phải null).
+    const scalar: Partial<Record<BugStatDimension, string>> = {
+      status: '$status',
+      severity: '$severity',
+      team: '$teamId',
+      project: '$projectId',
+    };
+    for (const dim of dimensions) {
+      const path = scalar[dim];
+      if (!path) continue;
+      facet[dim] = [
+        { $group: { _id: { $ifNull: [path, ''] }, count: { $sum: 1 } } },
+        { $project: { _id: 0, key: '$_id', name: { $literal: '' }, count: 1 } },
+        { $sort: { count: -1 } },
+      ];
+    }
+
+    // assignees là mảng {id, name} denormalized ngay trên issue
+    // (issue.schema.ts:91), nên tên ra luôn từ $group — không phải chạm module
+    // users, và tránh được trần 100 người của ALL_USERS.
+    if (dimensions.includes('assignee')) {
+      facet.assignee = [
+        // Bug chưa giao có mảng rỗng — $unwind sẽ nuốt mất hàng đó, nên thay bằng
+        // một phần tử rỗng để nó rơi vào ô '(unassigned)' thay vì biến mất.
+        {
+          $project: {
+            assignees: {
+              $cond: [
+                { $gt: [{ $size: { $ifNull: ['$assignees', []] } }, 0] },
+                '$assignees',
+                [{ id: '', name: '' }],
+              ],
+            },
+          },
+        },
+        { $unwind: '$assignees' },
+        { $group: { _id: '$assignees.id', name: { $first: '$assignees.name' }, count: { $sum: 1 } } },
+        { $project: { _id: 0, key: '$_id', name: 1, count: 1 } },
+        { $sort: { count: -1 } },
+      ];
+    }
+
+    if (dimensions.includes('label')) {
+      facet.label = [
+        {
+          $project: {
+            labelKeys: {
+              $cond: [{ $gt: [{ $size: { $ifNull: ['$labelKeys', []] } }, 0] }, '$labelKeys', ['']],
+            },
+          },
+        },
+        { $unwind: '$labelKeys' },
+        { $group: { _id: '$labelKeys', count: { $sum: 1 } } },
+        { $project: { _id: 0, key: '$_id', name: { $literal: '' }, count: 1 } },
+        { $sort: { count: -1 } },
+      ];
+    }
+
+    if (trend) {
+      const fmt = trend.unit === 'week' ? '%G-W%V' : '%Y-%m';
+      const bucket = (field: string) => ({
+        $dateToString: { format: fmt, date: field, timezone: trend.timezone },
+      });
+      facet.opened = [
+        { $group: { _id: bucket('$createdAt'), count: { $sum: 1 } } },
+        { $project: { _id: 0, bucket: '$_id', count: 1 } },
+      ];
+      // resolvedAt null = chưa đóng (hoặc đã mở lại — entity xoá mốc khi bug rời
+      // cột done). `$facet` chia sẻ chung một luồng input từ `$match` phía trên,
+      // nên nhánh này KHÔNG THỂ có cửa sổ createdAt riêng — nó vẫn bị giới hạn
+      // bởi since/until (lọc theo ngày mở), dù về mặt dữ liệu đúng ra "closed"
+      // nên tính theo ngày đóng. Hạn chế này được chấp nhận (không tách pipeline
+      // để sửa) — xem mô tả tool `get_bug_stats` để biết caveat được nêu cho caller.
+      facet.closed = [
+        { $match: { resolvedAt: { $ne: null } } },
+        { $group: { _id: bucket('$resolvedAt'), count: { $sum: 1 } } },
+        { $project: { _id: 0, bucket: '$_id', count: 1 } },
+      ];
+    }
+
+    const [raw] = await this.model
+      .aggregate([{ $match: match }, { $facet: facet }] as PipelineStage[])
+      .exec();
+
+    const dims: RawBugStats['dimensions'] = {};
+    for (const dim of dimensions) dims[dim] = (raw?.[dim] as RawBucket[]) ?? [];
+
+    return {
+      total: (raw?.total?.[0]?.n as number) ?? 0,
+      dimensions: dims,
+      opened: (raw?.opened as RawTrendRow[]) ?? [],
+      closed: (raw?.closed as RawTrendRow[]) ?? [],
+    };
   }
 
   async moveUnfinishedIssues(
@@ -330,32 +702,55 @@ export class IssueRepository
     fromCycleIds: string[],
     toCycleId: string,
     completedStatusKeys: string[],
-  ): Promise<number> {
-    if (!fromCycleIds.length) return 0;
+  ): Promise<MovedIssue[]> {
+    if (!fromCycleIds.length) return [];
+    const filter = { tenantId, cycleId: { $in: fromCycleIds }, status: { $nin: completedStatusKeys } };
+    // Read the affected issues *before* the bulk write — it's the only way to
+    // capture which cycle each one moved from; the write itself only knows the
+    // filter, not the per-document `cycleId` it matched.
+    const affected = await this.model
+      .find(filter, { _id: 1, shortId: 1, cycleId: 1 })
+      .lean<{ _id: string; shortId?: string; cycleId: string }[]>()
+      .exec();
+    if (!affected.length) return [];
+
     // Rolling into a real next cycle bumps the carry counter (drives the
     // "Carried over ×N" badge). Dropping to no-cycle (rollover off) clears it —
     // a detached issue isn't "carried" anywhere.
     const update = toCycleId
       ? { $set: { cycleId: toCycleId }, $inc: { carryOverCount: 1 } }
       : { $set: { cycleId: toCycleId, carryOverCount: 0 } };
-    const res = await this.model
-      .updateMany(
-        { tenantId, cycleId: { $in: fromCycleIds }, status: { $nin: completedStatusKeys } },
-        update,
-      )
-      .exec();
-    return res.modifiedCount ?? 0;
+    await this.model.updateMany(filter, update).exec();
+
+    return affected.map((d) => ({
+      id: d._id,
+      shortId: d.shortId ?? '',
+      fromCycleId: d.cycleId,
+      toCycleId,
+    }));
   }
 
-  async clearCycleIds(tenantId: string, cycleIds: string[]): Promise<number> {
-    if (!cycleIds.length) return 0;
-    const res = await this.model
-      .updateMany(
-        { tenantId, cycleId: { $in: cycleIds } },
-        { $set: { cycleId: '', carryOverCount: 0 } },
-      )
+  async clearCycleIds(tenantId: string, cycleIds: string[]): Promise<MovedIssue[]> {
+    if (!cycleIds.length) return [];
+    const filter = { tenantId, cycleId: { $in: cycleIds } };
+    // Read the affected issues *before* the bulk write, exactly as
+    // `moveUnfinishedIssues` does: the write only knows the filter, not the
+    // per-document `cycleId` it matched, and afterwards every one of them
+    // reads `''`.
+    const affected = await this.model
+      .find(filter, { _id: 1, shortId: 1, cycleId: 1 })
+      .lean<{ _id: string; shortId?: string; cycleId: string }[]>()
       .exec();
-    return res.modifiedCount ?? 0;
+    if (!affected.length) return [];
+
+    await this.model.updateMany(filter, { $set: { cycleId: '', carryOverCount: 0 } }).exec();
+
+    return affected.map((d) => ({
+      id: d._id,
+      shortId: d.shortId ?? '',
+      fromCycleId: d.cycleId,
+      toCycleId: '',
+    }));
   }
 
   async save(issue: IssueEntity): Promise<void> {

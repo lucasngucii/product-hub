@@ -2,7 +2,10 @@ import { Inject, Injectable } from '@nestjs/common';
 import { v4 as uuid } from 'uuid';
 import { IUsecaseExecute } from '@core/interfaces';
 import { Result } from '@shared/logic/result';
-import { randomRef } from '@module-shared/utils/short-id.util';
+import { sequentialRef } from '@module-shared/utils/sequential-ref.util';
+import { CounterService } from '@module-shared/services/counter.service';
+import { RecordActivityUseCase } from '@application/audit-log/use-cases';
+import { AuditActor, AuditEntity } from '@application/audit-log/domain/enums/audit.enums';
 import {
   CreateRoadmapDto,
   ReplaceRoadmapColumnsDto,
@@ -16,26 +19,53 @@ import {
   ROADMAP_ITEM_REF_PREFIX,
   RoadmapItemData,
 } from '../domain/types/roadmap-item.type';
+import { diffRoadmapItems } from '../domain/roadmap-item-diff';
 import { IRoadmapRepository } from '../repositories/roadmap.repository';
 
-/**
- * A fresh `RM-…` ref that no item in this roadmap already holds. Items live
- * embedded in the roadmap document, so "unique" is checked in memory against the
- * set of refs in play rather than against an index — a collision inside one
- * roadmap is what would actually break a URL. 31^7 ≈ 27.5 billion, so the retry
- * loop is a formality; the widened suffix is the backstop if it somehow isn't.
- */
-function mintItemRef(taken: Set<string>): string {
-  for (let i = 0; i < 5; i++) {
-    const ref = randomRef(ROADMAP_ITEM_REF_PREFIX);
-    if (!taken.has(ref)) {
-      taken.add(ref);
-      return ref;
-    }
+/** Fires one `RecordActivityUseCase` call per changed item, all sharing one
+ *  `at` so a single drag or bulk edit groups together in the UI. `entityId`
+ *  is deliberately the ITEM's id, not the roadmap's — the roadmap is only the
+ *  container; the timeline a user opens belongs to the item. */
+async function recordItemChanges(
+  activity: RecordActivityUseCase,
+  tenantId: string,
+  before: RoadmapItemData[],
+  after: RoadmapItemData[],
+  actor: { type: AuditActor; id: string; name: string },
+): Promise<void> {
+  const itemChanges = diffRoadmapItems(before, after);
+  if (!itemChanges.length) return;
+  const at = new Date();
+  for (const change of itemChanges) {
+    await activity.execute({
+      tenantId,
+      entity: AuditEntity.ROADMAP_ITEM,
+      entityId: change.itemId,
+      entityRef: change.itemRef,
+      actor,
+      changes: change.changes,
+      at,
+    });
   }
-  const ref = `${ROADMAP_ITEM_REF_PREFIX}-${uuid().replace(/-/g, '').slice(0, 12).toUpperCase()}`;
-  taken.add(ref);
-  return ref;
+}
+
+/**
+ * The next `RM-n` for this tenant, skipping anything the roadmap already holds.
+ * Items are embedded in the roadmap document, so `taken` is the whole universe:
+ * "unique" is checked in memory against the set of refs in play rather than
+ * against an index — a collision inside one roadmap is what would actually break
+ * a URL. Throws (via `sequentialRef`) if it cannot find a free number.
+ */
+async function mintItemRef(
+  counters: CounterService,
+  tenantId: string,
+  taken: Set<string>,
+): Promise<string> {
+  const minted = await sequentialRef(counters, tenantId, ROADMAP_ITEM_REF_PREFIX, async (ref) =>
+    taken.has(ref),
+  );
+  taken.add(minted.ref);
+  return minted.ref;
 }
 
 @Injectable()
@@ -114,26 +144,40 @@ export class UpdateRoadmapUseCase
   }
 }
 
+export interface ReplaceRoadmapItemsRequest {
+  id: string;
+  tenantId: string;
+  dto: ReplaceRoadmapItemsDto;
+  /** The caller — recorded on history rows. */
+  requesterId: string;
+  requesterName: string;
+  /** Defaults to USER. MCP passes API so a bot is distinguishable from a person. */
+  actorType?: AuditActor;
+}
+
 @Injectable()
 export class ReplaceRoadmapItemsUseCase
-  implements
-    IUsecaseExecute<
-      { id: string; tenantId: string; dto: ReplaceRoadmapItemsDto },
-      Result<RoadmapEntity>
-    >
+  implements IUsecaseExecute<ReplaceRoadmapItemsRequest, Result<RoadmapEntity>>
 {
-  constructor(@Inject(IRoadmapRepository) private readonly roadmaps: IRoadmapRepository) {}
+  constructor(
+    @Inject(IRoadmapRepository) private readonly roadmaps: IRoadmapRepository,
+    private readonly counters: CounterService,
+    private readonly activity: RecordActivityUseCase,
+  ) {}
   async execute({
     id,
     tenantId,
     dto,
-  }: {
-    id: string;
-    tenantId: string;
-    dto: ReplaceRoadmapItemsDto;
-  }): Promise<Result<RoadmapEntity>> {
+    requesterId,
+    requesterName,
+    actorType,
+  }: ReplaceRoadmapItemsRequest): Promise<Result<RoadmapEntity>> {
     const roadmap = await this.roadmaps.findById(id);
     if (!roadmap || roadmap.tenantId !== tenantId) return Result.fail('Roadmap not found');
+    // Snapshot BEFORE any mutation: `roadmap.replaceItems` below assigns a whole
+    // new array onto the entity in place, so a snapshot taken after would diff
+    // the entity against itself and yield a permanently empty diff.
+    const itemsBefore = roadmap.items;
     // The client replaces the whole array on every edit/drag, so createdAt is
     // stamped and preserved here rather than trusted from the request: keep an
     // existing item's original date (matched by id), and give brand-new items —
@@ -146,25 +190,43 @@ export class ReplaceRoadmapItemsUseCase
       roadmap.items.map((item) => item.shortId).filter((ref): ref is string => !!ref),
     );
     const now = new Date().toISOString();
-    const items = dto.items.map((item) => {
-      const prev = existingById.get(item.id);
-      // Timing is driven by the item's status: "started" the first time it reaches
-      // In progress (or jumps straight to Done), "completed" the first time it's
-      // Done. The first stamp wins and is preserved thereafter, so toggling the
-      // status later never moves the clock — and a client can't backdate it.
-      const isStarted =
-        item.status === RoadmapItemStatus.IN_PROGRESS || item.status === RoadmapItemStatus.DONE;
-      const isCompleted = item.status === RoadmapItemStatus.DONE;
-      return {
-        ...item,
-        shortId: prev?.shortId ?? mintItemRef(takenRefs),
-        createdAt: prev?.createdAt ?? item.createdAt ?? now,
-        startedAt: prev?.startedAt ?? (isStarted ? now : undefined),
-        completedAt: prev?.completedAt ?? (isCompleted ? now : undefined),
-      };
-    });
+    // A sequential loop, not `.map` + `Promise.all`: each draw has to see the
+    // refs the previous ones took, and parallel draws would race a stale set.
+    const items: typeof dto.items = [];
+    try {
+      for (const item of dto.items) {
+        const prev = existingById.get(item.id);
+        // Timing is driven by the item's status: "started" the first time it reaches
+        // In progress (or jumps straight to Done), "completed" the first time it's
+        // Done. The first stamp wins and is preserved thereafter, so toggling the
+        // status later never moves the clock — and a client can't backdate it.
+        const isStarted =
+          item.status === RoadmapItemStatus.IN_PROGRESS || item.status === RoadmapItemStatus.DONE;
+        const isCompleted = item.status === RoadmapItemStatus.DONE;
+        items.push({
+          ...item,
+          // Only a genuinely new item draws a number — an existing one keeps its
+          // ref, so a save never renumbers the board.
+          shortId: prev?.shortId ?? (await mintItemRef(this.counters, tenantId, takenRefs)),
+          createdAt: prev?.createdAt ?? item.createdAt ?? now,
+          startedAt: prev?.startedAt ?? (isStarted ? now : undefined),
+          completedAt: prev?.completedAt ?? (isCompleted ? now : undefined),
+        });
+      }
+    } catch (error) {
+      // `mintItemRef` throws; this use-case's contract is a Result, and an
+      // uncaught throw would surface as a 500 rather than an actionable message.
+      return Result.fail((error as Error).message);
+    }
     roadmap.replaceItems(items);
     await this.roadmaps.update(roadmap);
+
+    await recordItemChanges(this.activity, tenantId, itemsBefore, roadmap.items, {
+      type: actorType ?? AuditActor.USER,
+      id: requesterId,
+      name: requesterName,
+    });
+
     return Result.ok(roadmap);
   }
 }
@@ -173,6 +235,11 @@ export interface AddRoadmapItemRequest {
   id: string;
   tenantId: string;
   item: Partial<Omit<RoadmapItemData, 'id'>> & { title: string };
+  /** The caller — recorded on history rows. */
+  requesterId: string;
+  requesterName: string;
+  /** Defaults to USER. MCP passes API so a bot is distinguishable from a person. */
+  actorType?: AuditActor;
 }
 
 /**
@@ -186,14 +253,23 @@ export class AddRoadmapItemUseCase
   implements
     IUsecaseExecute<AddRoadmapItemRequest, Result<{ roadmap: RoadmapEntity; item: RoadmapItemData }>>
 {
-  constructor(@Inject(IRoadmapRepository) private readonly roadmaps: IRoadmapRepository) {}
+  constructor(
+    @Inject(IRoadmapRepository) private readonly roadmaps: IRoadmapRepository,
+    private readonly counters: CounterService,
+    private readonly activity: RecordActivityUseCase,
+  ) {}
   async execute({
     id,
     tenantId,
     item,
+    requesterId,
+    requesterName,
+    actorType,
   }: AddRoadmapItemRequest): Promise<Result<{ roadmap: RoadmapEntity; item: RoadmapItemData }>> {
     const roadmap = await this.roadmaps.findById(id);
     if (!roadmap || roadmap.tenantId !== tenantId) return Result.fail('Roadmap not found');
+    // Snapshot BEFORE any mutation — see the same note in ReplaceRoadmapItemsUseCase.
+    const itemsBefore = roadmap.items;
 
     const columns = roadmap.columns.length ? roadmap.columns : DEFAULT_ROADMAP_COLUMNS;
     const phase = item.phase || columns[0].key;
@@ -207,13 +283,23 @@ export class AddRoadmapItemUseCase
     const isStarted =
       status === RoadmapItemStatus.IN_PROGRESS || status === RoadmapItemStatus.DONE;
     const now = new Date().toISOString();
+    // `mintItemRef` throws; this use-case's contract is a Result, and an uncaught
+    // throw would surface as a 500 rather than an actionable message.
+    let shortId: string;
+    try {
+      shortId = await mintItemRef(
+        this.counters,
+        tenantId,
+        new Set(roadmap.items.map((i) => i.shortId).filter((ref): ref is string => !!ref)),
+      );
+    } catch (error) {
+      return Result.fail((error as Error).message);
+    }
     // Same RICE defaults the board's own "+ Add" uses (3s → a score of 9), so an
     // item added here sorts alongside hand-made ones instead of at zero.
     const created: RoadmapItemData = {
       id: uuid(),
-      shortId: mintItemRef(
-        new Set(roadmap.items.map((i) => i.shortId).filter((ref): ref is string => !!ref)),
-      ),
+      shortId,
       title: item.title,
       description: item.description ?? '',
       phase,
@@ -226,6 +312,7 @@ export class AddRoadmapItemUseCase
       progress: item.progress ?? 0,
       imageUrl: item.imageUrl ?? '',
       startDate: item.startDate ?? '',
+      endDate: item.endDate ?? '',
       assignees: item.assignees ?? [],
       createdAt: now,
       startedAt: isStarted ? now : undefined,
@@ -238,6 +325,13 @@ export class AddRoadmapItemUseCase
 
     roadmap.replaceItems([...roadmap.items, created]);
     await this.roadmaps.update(roadmap);
+
+    await recordItemChanges(this.activity, tenantId, itemsBefore, roadmap.items, {
+      type: actorType ?? AuditActor.USER,
+      id: requesterId,
+      name: requesterName,
+    });
+
     return Result.ok({ roadmap, item: created });
   }
 }
@@ -268,15 +362,55 @@ export class ReplaceRoadmapColumnsUseCase
   }
 }
 
+export interface DeleteRoadmapRequest {
+  id: string;
+  tenantId: string;
+  /** The caller — recorded on the items' `deleted` rows. */
+  requesterId: string;
+  requesterName: string;
+}
+
 @Injectable()
-export class DeleteRoadmapUseCase
-  implements IUsecaseExecute<{ id: string; tenantId: string }, Result<void>>
-{
-  constructor(@Inject(IRoadmapRepository) private readonly roadmaps: IRoadmapRepository) {}
-  async execute({ id, tenantId }: { id: string; tenantId: string }): Promise<Result<void>> {
+export class DeleteRoadmapUseCase implements IUsecaseExecute<DeleteRoadmapRequest, Result<void>> {
+  constructor(
+    @Inject(IRoadmapRepository) private readonly roadmaps: IRoadmapRepository,
+    private readonly activity: RecordActivityUseCase,
+  ) {}
+  async execute({
+    id,
+    tenantId,
+    requesterId,
+    requesterName,
+  }: DeleteRoadmapRequest): Promise<Result<void>> {
     const roadmap = await this.roadmaps.findById(id);
     if (!roadmap || roadmap.tenantId !== tenantId) return Result.fail('Roadmap not found');
+    // Snapshot BEFORE the delete — the items live inside the document that is
+    // about to go, so nothing can name them afterwards.
+    const doomed = roadmap.items.map((item) => ({
+      id: item.id,
+      ref: item.shortId || item.id,
+    }));
     await this.roadmaps.delete(id);
+
+    // `diffRoadmapItems` emits `deleted` faithfully when an item disappears
+    // through `replaceItems`; dropping the whole roadmap has to say the same
+    // thing, or an item's timeline just stops. The item is the tracked entity
+    // — the roadmap is only its container, and has no timeline of its own to
+    // record this on. `automated`: the user deleted a roadmap, not N items.
+    const at = new Date();
+    for (const item of doomed) {
+      await this.activity.execute({
+        tenantId,
+        entity: AuditEntity.ROADMAP_ITEM,
+        entityId: item.id,
+        entityRef: item.ref,
+        actor: { type: AuditActor.USER, id: requesterId, name: requesterName },
+        automated: true,
+        at,
+        changes: [{ field: 'deleted', oldValue: '', newValue: '' }],
+      });
+    }
+
     return Result.ok();
   }
 }

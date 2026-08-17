@@ -11,22 +11,37 @@ export const en = {
   'nav.roadmaps': 'Roadmaps',
   'nav.docs': 'Docs',
   'nav.bugs': 'Bugs',
-  'nav.milestones': 'OKRs',
   'nav.inbox': 'Inbox',
   'nav.tasks': 'My Tasks',
-  'nav.issues': 'Issues',
   'nav.myTeam': 'My Team',
   'nav.favourites': 'Favourites',
+  'nav.savedViews': 'Views',
   'nav.assignedToMe': 'Assigned to me',
+  'nav.allIssues': 'All issues',
   'nav.today': 'Today & Overdue',
   'nav.personalList': 'Personal List',
   'nav.designPatterns': 'Design patterns',
   'nav.signOut': 'Sign out',
   'nav.collapse': 'Collapse sidebar',
   'nav.expand': 'Expand sidebar',
+  'nav.resize': 'Resize sidebar',
+  'nav.resizeHint': 'Drag to resize · double-click to reset',
   'nav.menu': 'Menu',
   'nav.create': 'Create new',
   'nav.newTeam': 'New space',
+
+  // Level 1 of the sidebar — the icon rail. Each label sits under a 20px glyph in
+  // a 68px column, so one short word each: "Discovery", not "Product Discovery".
+  // Discovery/Delivery/Quality are headings inside the Workspace panel now, and
+  // are still one word for the same reason: they head a 220px column.
+  'nav.areas': 'Areas',
+  // The key is the area's stable id; the label is what the rail and the panel
+  // title read. "Home" because that's where the stop lands (`/`) and what the
+  // first thing in a menu is called — "Workspace" named the app, not a place.
+  'navarea.workspace': 'Home',
+  'navarea.discovery': 'Discovery',
+  'navarea.quality': 'Quality',
+  'navarea.more': 'More',
 
   'theme.toggle': 'Toggle light / dark',
   'theme.light': 'Light',
@@ -81,8 +96,12 @@ export const en = {
   'dashboard.projects': 'Projects',
   'dashboard.comingSoon': 'Coming in the next phase',
 
+  'projects.hint': 'Test plans and coverage across every project.',
   'projects.new': 'New project',
   'projects.create': 'Create project',
+  'projects.search': 'Search projects…',
+  'projects.coverage': 'Coverage',
+  'projects.noMatch': 'No projects match your search.',
   'projects.edit': 'Edit project',
   'projects.rename': 'Rename',
   'projects.empty': 'No projects yet. Create your first one to get started.',
@@ -167,6 +186,24 @@ export const en = {
   'report.importReady': 'ready',
   'report.importSkipped': 'skipped',
   'report.importMoreRows': 'more rows',
+  // Feature import (sidebar group → upload button).
+  'report.importFeatures': 'Import features',
+  'report.importFeaturesTip': 'Import features from a file',
+  'report.importFeaturesHint':
+    'Drop an Excel, CSV, or JSON file. A "Feature" column names each feature; the other columns (Area, Type, Result, Owner, Steps, Expected…) become its test cases. Features land in',
+  'report.importFeaturesEmpty':
+    'No features found. Add a "Feature" column, or give each feature its own sheet.',
+  'report.importSplitColumn': 'Split by the Feature column',
+  'report.importSplitSheet': 'One feature per sheet',
+  'report.importSplitFile': 'Whole file as one feature',
+  'report.importExisting': 'Already exists',
+  'report.importFeaturesSummary': 'Importing {features} and {cases}.',
+  'report.importFeaturesCreated': '{features} created',
+  'report.importFeaturesToppedUp': '{n} topped up',
+  'report.importFeaturesCases': '{cases} imported',
+  'report.importFeaturesFailed': 'Some features could not be imported:',
+  'report.featureOne': 'feature',
+  'report.featureMany': 'features',
   'report.caseOne': 'case',
   'report.caseMany': 'cases',
   'report.noCases': 'No test cases yet. Add one below or import a file.',
@@ -320,7 +357,11 @@ export const en = {
   'bugs.templateUiVisualHint': 'What looks wrong, on which screen and size, vs the design',
 
   'activity.title': 'Activity',
-  'activity.empty': 'No comments yet.',
+  // The two tabs the Activity section splits into. `history` is labelled
+  // "Activity" but holds the change log only — the comments live next door, so
+  // the key says which content it names rather than which word it prints.
+  'activity.tab.comments': 'Comments',
+  'activity.tab.history': 'Activity',
   'activity.placeholder': 'Leave a comment…',
   'activity.comment': 'Comment',
   'activity.reply': 'Leave a reply…',
@@ -332,6 +373,72 @@ export const en = {
   'activity.confirmDelete': 'Delete this comment?',
   'activity.attach': 'Attach image or video',
   'activity.dropHint': 'Drop an image or video to attach',
+
+  // Activity log — history rows rendered as sentences (entryText.ts). Namespaced
+  // `activityLog.*` rather than `activity.*` to avoid colliding with the comment
+  // thread's keys above.
+  'activityLog.field.status': 'status',
+  'activityLog.field.assignees': 'assignee',
+  'activityLog.field.severity': 'severity',
+  'activityLog.field.type': 'type',
+  'activityLog.field.labelKeys': 'labels',
+  'activityLog.field.estimate': 'estimate',
+  'activityLog.field.cycleId': 'cycle',
+  'activityLog.field.parentId': 'parent',
+  'activityLog.field.startDate': 'start date',
+  'activityLog.field.endDate': 'end date',
+  'activityLog.field.dueDate': 'due date',
+  'activityLog.field.projectId': 'project',
+  'activityLog.field.roadmapItemId': 'roadmap item',
+  'activityLog.field.reportId': 'report',
+  'activityLog.field.caseId': 'test case',
+  'activityLog.field.title': 'title',
+  'activityLog.field.description': 'description',
+  // Doc-page only: a page's rank among its siblings (see NO_VALUE_FIELDS in
+  // entryText.ts) — reads as "changed position", never the raw integer.
+  'activityLog.field.order': 'position',
+  // Roadmap-item fields (roadmap-item-diff.ts). `phase` is the board pool the
+  // card sits in — a different field from `status`, and both are tracked.
+  'activityLog.field.phase': 'phase',
+  'activityLog.field.difficulty': 'difficulty',
+  'activityLog.field.progress': 'progress',
+  // RICE inputs, each logged on its own so "who dropped confidence to 1?" has
+  // an answer. Wording follows the roadmap form's own labels.
+  'activityLog.field.reach': 'reach',
+  'activityLog.field.impact': 'impact',
+  'activityLog.field.confidence': 'confidence',
+  'activityLog.field.effort': 'effort',
+  // The item's milestone/objective/key-result link, logged through its readable
+  // label rather than its three uuids.
+  'activityLog.field.okrLabel': 'linked OKR',
+  // Test-case only: reaches an issue's timeline as a related row.
+  'activityLog.field.result': 'result',
+  'activityLog.verb.created': 'created this',
+  'activityLog.verb.deleted': 'deleted this',
+  'activityLog.verb.changed': 'changed',
+  'activityLog.verb.edited': 'edited the',
+  // Doc pages only (RestoreDocPageVersionUseCase).
+  'activityLog.verb.restored': 'restored an earlier version',
+  // Word order for the whole sentence after the subject. English is SVO, so the
+  // verb leads and the values trail: "Felix changed status [Backlog] → [Done]".
+  // This template IS the ordering decision — `entryText.ts` reads the slots off
+  // it and the component just renders them in that order, so a locale reorders
+  // itself here and nowhere else. See the `ko` entry, which reads the other way.
+  'activityLog.sentence': '{verb} {field} {values}',
+  'activityLog.viaApiKey': 'API key',
+  // FIX 6: Task 18 (cycle rollover) is the first write path to set
+  // `automated: true`; this badge is its rendering path, added now so it
+  // doesn't land on a component with nowhere to show it.
+  'activityLog.automated': 'automatic',
+  'activityLog.notSet': 'not set',
+  'activityLog.systemActor': 'Automatically',
+  'activityLog.relation.subtask': 'subtask',
+  'activityLog.relation.doc': 'attached doc',
+  'activityLog.relation.roadmap_item': 'roadmap item',
+  'activityLog.relation.testcase': 'test case',
+  // The backend caps how many related objects it folds into one timeline.
+  'activityLog.relatedTruncated': 'Some history from linked items isn’t shown.',
+  'activityLog.empty': 'No history yet.',
 
   'inbox.title': 'Inbox',
   'inbox.empty': 'Your inbox is empty.',
@@ -368,11 +475,20 @@ export const en = {
   'docs.tagsPlaceholder': 'discovery, spec, research…',
   'docs.noTagMatch': 'No docs carry those tags.',
   'docs.noTagMatchHint': 'Clear the filter, or tag a doc from its ⋯ menu.',
+  'docs.allDocs': 'All docs',
+  'docs.mine': 'Created by me',
+  'docs.noMineMatch': "You haven't created a doc yet.",
+  'docs.noMineMatchHint': 'Docs you start show up here — write the first one.',
   'docs.empty': 'No docs yet. Write down what the team decided, and why.',
   'docs.emptyHint': 'Product briefs, research notes, specs — one doc, many pages.',
   'docs.pages': 'pages',
   'docs.onePage': 'page',
   'docs.createdBy': 'By {name}',
+  'docs.duplicate': 'Duplicate doc',
+  'docs.duplicating': 'Duplicating…',
+  // The suffix a copy's title gets. Leading space included — it's appended.
+  'docs.copySuffix': ' (copy)',
+  'docs.duplicated': 'Copied to “{title}”',
   'docs.delete': 'Delete doc',
   'docs.confirmDelete': 'Delete this doc and every page in it? This cannot be undone.',
   'docs.searchPages': 'Search pages',
@@ -418,6 +534,11 @@ export const en = {
   'docs.saving': 'Saving…',
   'docs.saved': 'Saved',
   'docs.unsaved': 'Unsaved changes',
+  'docs.collab.connecting': 'Connecting…',
+  'docs.collab.offline': 'Reconnecting…',
+  'docs.collab.editing': 'here now',
+  'docs.collab.live': 'Live',
+  'docs.collab.liveHint': 'Changes save themselves and everyone sees them as you type.',
   'docs.collapseRail': 'Hide pages',
   'docs.expandRail': 'Show pages',
   'docs.pagesLabel': 'Pages',
@@ -454,6 +575,8 @@ export const en = {
   'docs.comments.add': 'Comment',
   'docs.comments.open': 'Open',
   'docs.comments.resolved': 'Resolved',
+  // The page's own change log (activity-log/ActivityEntry) — third tab of the rail.
+  'docs.comments.history': 'History',
   'docs.comments.empty': 'No open comments. Select any text to start one.',
   'docs.comments.emptyResolved': 'Nothing resolved yet.',
   'docs.comments.orphaned': 'The text this refers to is no longer on the page.',
@@ -513,7 +636,7 @@ export const en = {
   'roadmaps.ganttStarts': 'Starts {date}',
   'roadmaps.ganttLegendBar': 'Bar = item (start → last task end), filled by progress',
   'roadmaps.ganttLegendTaskBar': 'Solid bar = a task’s start → end',
-  'roadmaps.ganttDragHint': 'Drag a task bar to move it, or an edge to change that date',
+  'roadmaps.ganttDragHint': 'Drag a bar to move it, or an edge to change that date',
   'roadmaps.ganttSaveFailed': 'Couldn’t change those dates — put them back.',
   'roadmaps.ganttLegendMarker': 'Diamond = a task with only one date',
   'roadmaps.newColumn': 'New column',
@@ -555,7 +678,7 @@ export const en = {
   'roadmaps.tasksLinked': 'Linked {count} task(s) from the description.',
   'roadmaps.phase': 'Phase',
   'roadmaps.score': 'Score',
-  'roadmaps.startDate': 'Start date',
+  'roadmaps.dates': 'Dates',
   'roadmaps.assignees': 'Assignees',
   'roadmaps.addAssignee': '+ Add assignee…',
   'roadmaps.okr': 'OKR',
@@ -579,6 +702,58 @@ export const en = {
   'roadmaps.legendLowHigh': 'low → high',
   'roadmaps.legendBubble': 'Bubble size = Reach',
 
+  // Sprints on a roadmap. Deliberately "sprint", not "cycle": a *cycle* is one
+  // team's calendar, while a roadmap spans several teams, so these words name the
+  // shared window their cycles run in (see `useRoadmapSprints`). A backlog item's
+  // sprint is derived from its tasks — nothing here is ever assigned directly.
+  'sprints.filterLabel': 'Sprint',
+  'sprints.current': 'Current sprint',
+  'sprints.all': 'All sprints',
+  'sprints.none': 'Not in a sprint',
+  /** The window is several teams' cycles at once — shown only when > 1. */
+  'sprints.teams': '{n} teams',
+  'sprints.backlogItems': 'backlog items',
+  'sprints.tasksDone': 'tasks done',
+  // Timeline
+  'sprints.groupBySprint': 'Group by sprint',
+  'sprints.axisBands': 'Sprints on the axis',
+  'sprints.axisHint': 'Shaded columns are sprints',
+  'sprints.noSprintGroup': 'No sprint',
+  'sprints.groupSummary': '{items} items · {done}/{tasks} tasks done',
+  /** Strict scoping means a sprint view can legitimately be empty — say why, and
+   *  point at the two ways out rather than leaving a blank board. */
+  'sprints.emptyScoped': 'Nothing committed to this sprint',
+  'sprints.emptyScopedHint':
+    'No backlog item here has a task in this sprint yet. Try another sprint, or open “Not in a sprint” to see what’s still unplanned.',
+  'sprints.emptyNone': 'Everything is in a sprint',
+  'sprints.emptyNoneHint': 'Every backlog item on this roadmap has work committed to a sprint.',
+  /** Moving an item between sprints. An item has no cycle of its own, so these all
+   *  describe what happened to its *tasks* — vague copy here would hide the fan-out. */
+  'sprints.moved': 'Moved to {name}',
+  'sprints.movedOut': 'Taken out of its sprint',
+  'sprints.moveTasks': '{n} tasks',
+  /** Not an error: the target window has no cycle for that task's team, so it
+   *  stayed where it was. Silence here would leave a stale chip unexplained. */
+  'sprints.moveStuck': '{n} stayed — their team has no cycle in that window',
+  'sprints.moveFailed': 'Couldn’t move the item',
+  'sprints.moveNoTasks': 'Link a task first — a backlog item is scheduled through its tasks',
+  /** The confirmation shown when a move would take *finished* tasks along. Name the
+   *  cycle losing them, not the one gaining them: the surprise is on the way out. */
+  'sprints.moveDoneTitle': 'This also moves work that’s already done',
+  'sprints.moveDoneBody':
+    '{n} finished tasks would be pulled out of {from}, changing what that cycle reports as completed — its velocity and burndown.',
+  'sprints.moveDoneClosed':
+    'That cycle has already closed, so it reported those numbers when it ended.',
+  /** Why "Move unfinished only" is dead. Precisely: not "everything is finished",
+   *  but "nothing unfinished would *change cycle*" — an unfinished task already in
+   *  the target isn't a write, so it never reaches this dialog either. */
+  'sprints.moveDoneAllDone':
+    'Nothing unfinished would move — every task that would change cycle here is already finished.',
+  'sprints.moveUnfinishedOnly': 'Move unfinished only',
+  'sprints.moveAllAnyway': 'Move all',
+  /** Left behind on purpose, so the count reads as chosen rather than dropped. */
+  'sprints.moveKeptDone': '{n} finished stayed in their cycle',
+
   // Tasks — engineering execution on a backlog item
   'tasks.title': 'Tasks',
   'tasks.empty': 'No tasks yet — add the first piece of work.',
@@ -593,23 +768,87 @@ export const en = {
   'relations.search': 'Search by title or ID…',
   'relations.empty': 'No matching issues.',
   'relations.none': 'Search an issue to link.',
+  /** Searched `RM-…` here: a backlog item is not an issue, so no issue picker can
+   *  match one. Point at the field that does hold it. */
+  'relations.backlogRef':
+    'That looks like a backlog item — those aren’t issues. Link one from the “Backlog item” field in Properties.',
   'relations.remove': 'Remove relation',
   'relations.kindBug': 'Bug',
+  /** The picker's confirm button when several rows can be ticked at once. */
+  'relations.linkCount': 'Link {count}',
   'tasks.assign': 'Assign',
   'tasks.unassigned': 'Unassigned',
   'tasks.assignMe': 'Assign to me',
   'tasks.assignedYou': 'Assigned to you',
   'tasks.doneOf': '{done} of {total} done',
   'subtasks.title': 'Sub-tasks',
+  'subtasks.expand': 'Expand sub-tasks',
+  'subtasks.collapse': 'Collapse sub-tasks',
   'subtasks.linkTitle': 'Link an existing task as a sub-task',
+  /** The same picker on a bug, where it's scoped to bugs — the wording has to
+   *  match what you'll actually be offered. */
+  'subtasks.linkBugTitle': 'Link an existing bug as a sub-issue',
   'subtasks.empty': 'No sub-tasks yet — break this work into smaller pieces.',
   'subtasks.addPlaceholder': 'Add a sub-task and press Enter…',
   'subtasks.add': 'Add sub-task',
   'subtasks.titlePlaceholder': 'Sub-task title',
+  'subtasks.parent': 'Parent',
+  /** Top of the Parent picker on a backlog item, where a row needs no parent. */
+  'subtasks.parentNone': 'No parent',
+  /** Its parent isn't one of the rows here — better than drawing it as top-level. */
+  'subtasks.parentElsewhere': 'Another issue',
+  /** The row's ✕. Both say "keeps the …" because this button used to delete the
+   *  issue outright, and the whole point of the change is that it no longer does. */
+  'subtasks.unlinkParent': 'Detach from parent (keeps the task)',
+  'subtasks.unlinkBacklog': 'Remove from this backlog item (keeps the task)',
+  /** Bugs found against this work: listed, but outside the progress bar. */
+  'subtasks.bugs': 'Bugs',
+  /** Properties row: this issue has no parent yet and you may give it one. */
+  'issues.parentSet': 'Set parent',
+  'issues.parentPick': 'Choose a parent issue',
+  'issues.parentClear': 'Remove parent',
   'issues.add': 'Add issue',
   'issues.mySubtitle': 'Everything assigned to you — tasks and bugs.',
+  'issues.allTitle': 'All issues',
+  'issues.allSubtitle': 'Every task and bug in the workspace.',
+  'issues.emptyAll': 'No issues here yet.',
+  // Composed with a count in code (`100 / 342 shown — …`), like the bulk keys below.
+  'issues.cappedHint': 'shown — narrow it with search or filters.',
   'issues.kindTasks': 'Tasks',
   'issues.kindBugs': 'Bugs',
+  // Saved views on the issue board — save the current filter/sort/search
+  // combination under a name (`?sv=<id>`), and reapply it later.
+  'savedViews.saveCurrent': 'Save view',
+  'savedViews.save': 'Save',
+  'savedViews.saveAsNew': 'Save as new',
+  'savedViews.modified': 'Modified',
+  'savedViews.name': 'View name',
+  'savedViews.share': 'Share with the workspace',
+  'savedViews.shareHint': 'Anyone in the workspace can open and use this view.',
+  // Shown when `?sv=` names a view that's gone (deleted) or not shared with
+  // this user — the board opens with its default filters instead of blank.
+  'savedViews.cannotOpen': "This view is no longer available — showing the default board.",
+  // Shown when applying a saved view drops a filter pointing at something
+  // deleted since it was saved (a project, a backlog item).
+  'savedViews.someFiltersDropped': 'Some filters in this view point to items that no longer exist and were skipped.',
+  // Hover delete action on a saved-view sidebar row — shown only when the
+  // viewer owns the view or is an admin (mirrors the backend's own gate).
+  'savedViews.delete': 'Delete view',
+  // Sort control (list view) — field on top, direction below. `sort.title` also
+  // composes into the trigger (`Sort: ID`), so it carries no trailing colon.
+  'sort.title': 'Sort',
+  // The resting state: no `sort`/`dir` is sent and the list is in whatever order
+  // the server returns it. Named rather than left blank, so an unsorted list is
+  // never mistaken for one sorted by the first field in the menu.
+  'sort.fieldDefault': 'Default order',
+  'sort.fieldId': 'ID',
+  'sort.fieldCreated': 'Created',
+  'sort.fieldUpdated': 'Updated',
+  // Bug lists only — the same word the filter and the card dot use, so the two
+  // controls name one thing. Ordered by the scale, so descending is worst first.
+  'sort.fieldSeverity': 'Severity',
+  'sort.ascending': 'Ascending',
+  'sort.descending': 'Descending',
   // Bulk actions — the List-view multi-select toolbar. Count words compose with a
   // number in code (`3 selected`, `2 updated`), so they carry no placeholder.
   'bulk.selected': 'selected',
@@ -645,6 +884,8 @@ export const en = {
   'tasks.titleLabel': 'Title',
   'tasks.descriptionLabel': 'Description',
   'tasks.noBacklogItem': 'No backlog item',
+  /** The option labels lead with the `RM-…` ref, so pasting one finds it. */
+  'tasks.backlogSearch': 'Search by ref or title…',
   'tasks.assignedToYouHint': 'This task will be assigned to you.',
   'tasks.search': 'Search tasks…',
   'tasks.viewBoard': 'Board',
@@ -673,13 +914,9 @@ export const en = {
   // Issue picker — link an existing task or bug to a backlog item
   'tasks.pick': 'Link existing',
   'tasks.pickTitle': 'Link an existing task or bug',
-  'tasks.pickSearch': 'Search by name or ID…',
-  'tasks.pickEmpty': 'Nothing matches that name or ID.',
-  'tasks.pickNone': 'Nothing else to link yet.',
   'tasks.pickLinkedTo': 'Linked to {item}',
   'tasks.pickUnlinked': 'Not linked to a backlog item',
   'tasks.pickMoveHint': 'Linking moves the item here from its current backlog item.',
-  'tasks.pickKindBug': 'Bug',
   'tasks.pickAction': 'Link',
 
   // My Team — the per-person workload board (Box view) + its List/Board tabs.
@@ -756,6 +993,9 @@ export const en = {
   'people.email': 'Email',
   'people.password': 'Temporary password',
   'people.role': 'Role',
+  'people.lastOnline': 'Last online',
+  'people.online': 'Online',
+  'people.neverOnline': 'Never',
   'people.empty': 'No users yet.',
   'people.confirmDelete': 'Remove this user?',
   'people.remove': 'Remove',
@@ -766,6 +1006,19 @@ export const en = {
   'people.generate': 'Generate',
   'people.resetHint': 'Share this password with them — they can change it after signing in.',
   'people.resetDone': 'Password set. Share it with {name}:',
+
+  // Assignee picker — one widget for every "who's on this?" control
+  'assignee.search': 'Search or enter email…',
+  'assignee.assignees': 'Assignees',
+  'assignee.people': 'People',
+  'assignee.me': 'Me',
+  'assignee.unassigned': 'Unassigned',
+  'assignee.assign': 'Assign…',
+  'assignee.clear': 'Clear',
+  'assignee.count': '{n} assignees',
+  'assignee.noMatch': 'No one matches.',
+  'assignee.invite': 'Invite people via email',
+  'assignee.inviteHint': 'They get an account right away — share the password with them.',
 
   // Account — the signed-in user's own settings
   'account.changePassword': 'Change password',
@@ -800,6 +1053,12 @@ export const en = {
   // Language — the locale switch. Saved in this browser, not on the account.
   'profile.language': 'Language',
   'profile.languageHint': 'Applies to this browser only. The page reloads to switch.',
+  // Side menu — which of the two navigation shapes this browser draws.
+  'profile.sideMenu': 'Side menu',
+  'profile.sideMenuHint':
+    'New groups the app into areas you pick from a rail. Classic stacks every section in one column. Applies to this browser only.',
+  'navstyle.twoLevel': 'New',
+  'navstyle.classic': 'Classic',
 
   'settings.title': 'Settings',
   'settings.subtitle': 'Configure your workspace, integrations and notifications.',
@@ -838,8 +1097,16 @@ export const en = {
   'settings.mcpDesktopNote':
     'Works with Claude Code and any client that can send a header. Claude Desktop’s custom connectors expect an OAuth sign-in rather than a key, so they can’t use this URL yet.',
   'settings.mcpKeysNote': 'MCP uses the same keys as the API — revoke one under Settings → API keys.',
+  'settings.mcpKeyScope': 'Access',
+  'settings.mcpKeyScopeHint':
+    'What an assistant using this key may do. Start read-only and widen only when you want it to create, edit, or delete.',
+  'settings.mcpVerbCreated': 'Created',
+  'settings.mcpVerbUpdated': 'Updated',
+  'settings.mcpVerbDeleted': 'Deleted',
+  'settings.mcpVerbMoved': 'Moved',
+  'settings.mcpVerbCommented': 'Commented',
   'settings.mcpTools':
-    'Then ask it to “list my Product OS workspace”, “file a bug for QC”, “add a backlog item”, or “write this up as a doc — with a diagram of the flow”. Team, status and assignee accept plain names; an unknown one comes back with the valid choices instead of guessing.',
+    'Then ask it to “list my Product OS workspace”, “file a bug for QC”, “add a backlog item”, or “write this up as a doc — with a diagram of the flow”. It can attach a screenshot too — “file this bug and attach the screenshot” uploads the file to your storage and puts it on the bug. Team, status and assignee accept plain names; an unknown one comes back with the valid choices instead of guessing.',
   'settings.mcpReady': 'Your key is ready',
   'settings.mcpReadyHint': 'This command already contains it — run it in your terminal.',
   'settings.mcpHistory': 'Created via MCP',
@@ -847,6 +1114,54 @@ export const en = {
   'settings.mcpNoHistory': 'Nothing has been created via MCP yet.',
   'settings.mcpShowMore': 'Show more',
   'settings.webhooks': 'Webhooks',
+
+  'settings.github': 'GitHub',
+  'settings.githubHint':
+    'Show the work behind an item. Write a ref like ENG-14 in a commit message, a branch name or a pull request title, and it appears on that task, bug or backlog item.',
+  'settings.githubStep1': 'Connect this workspace',
+  'settings.githubStep1Hint':
+    'Creates the address GitHub sends to, and the secret it signs with. The secret is shown once.',
+  'settings.githubConnect': 'Connect GitHub',
+  'settings.githubConnected': 'Connected',
+  'settings.githubRegenerate': 'Regenerate',
+  'settings.githubRegenerateHint':
+    'Regenerating replaces both the URL and the secret — update the webhook in GitHub straight after, or deliveries stop.',
+  'settings.githubRegenerateConfirm':
+    'The URL and secret in use right now stop working the moment you do this. Every repository pointing here goes quiet — with a 401, not an error anyone will see — until you paste the new pair into its webhook. The new secret is shown once.',
+  'settings.githubRegenerateRepos': 'Delivering here today:',
+  'settings.githubDisconnect': 'Disconnect',
+  'settings.githubDisconnectConfirm':
+    'The webhook URL stops answering immediately. Commits already linked stay on their items; new ones will not arrive until you connect again.',
+  'settings.githubDisconnected': 'GitHub disconnected.',
+  'settings.githubStep2': 'Add the webhook in GitHub',
+  'settings.githubStep2Hint':
+    'In your repository: Settings → Webhooks → Add webhook. Paste the two values below.',
+  'settings.githubStep2Locked': 'Connect the workspace first — the URL is created with it.',
+  'settings.githubBase': 'API address',
+  'settings.githubBaseHint':
+    'Where GitHub reaches this API. Change it if this API is published on a different address from the one your browser uses — GitHub calls in from the internet.',
+  'settings.githubPayloadUrl': 'Payload URL',
+  'settings.githubSecret': 'Secret',
+  'settings.githubSecretOnce':
+    'Copy the secret now — it is never shown again. Lost it? Regenerate, then update the webhook in GitHub.',
+  'settings.githubContentType': 'Content type: application/json',
+  'settings.githubEvents': 'Events: Pushes and Pull requests.',
+  'settings.githubReady': 'Your webhook is ready',
+  'settings.githubReadyHint': 'Paste these into GitHub → Settings → Webhooks → Add webhook.',
+  'settings.githubStep3': 'Name an item in your work',
+  'settings.githubStep3Hint':
+    'Copy the ref from the item — it is next to the title — and use it anywhere in the message.',
+  // The example is the one place the product tells a developer what to type, so
+  // it has to show the shape refs actually have now: a team's own prefix.
+  'settings.githubCommitExample': 'git commit -m "ENG-14 fix the login redirect"',
+  'settings.githubRefsHint':
+    'Branch names and pull request titles count too, so naming it once at git checkout -b is enough. Every ticket works — a team’s own prefix (ENG-14, QC-8), and backlog items (RM-6). Each team’s prefix is set in Settings → Teams.',
+  'settings.githubActivity': 'Deliveries',
+  'settings.githubActivityHint': 'Proof the link is live — what GitHub last sent, and from where.',
+  'settings.githubReceiving': 'Receiving',
+  'settings.githubWaiting':
+    'Nothing received yet. GitHub sends a test the moment you add the webhook — reload this page after saving it.',
+
   'settings.storage': 'Storage',
   'settings.storageHint': 'Cloud storage for uploaded images and short videos.',
   'settings.storageProvider': 'Provider',
@@ -1070,6 +1385,17 @@ export const en = {
   'teams.icon': 'Team symbol',
   'teams.changeIcon': 'Change symbol',
   'teams.name': 'Team name',
+  'teams.prefix': 'Ticket prefix',
+  'teams.prefixHint': 'New tickets will be numbered {prefix}-1, {prefix}-2…',
+  'teams.prefixEmptyHint': 'Set a prefix to number this team’s tickets.',
+  'teams.prefixLocked': 'Locked — this team has already issued tickets',
+  'teams.prefixInvalid': '2–6 characters, letters and numbers, starting with a letter.',
+  // Server-side prefix rejections, matched by the `code` the API sends beside its
+  // message (see PREFIX_ERROR_KEYS in TeamsSection).
+  'teams.prefixTaken': 'Another team already uses that prefix.',
+  'teams.prefixReserved': 'That prefix is reserved by the workspace.',
+  'teams.prefixFrozen':
+    'This team has already issued tickets, so its prefix can no longer be changed.',
   'teams.issueType': 'Issues',
   'teams.archive': 'Archive',
   'teams.unarchive': 'Unarchive',
@@ -1105,6 +1431,7 @@ export const en = {
   'boards.moveFailed': 'Couldn’t move that card — put it back.',
   // Boards — the shared Timeline (Gantt) view on every issue board
   'boards.today': 'Today',
+  'boards.resizeColumn': 'Drag to resize this column',
   'boards.viewTimeline': 'Timeline',
   'boards.timelineIssue': 'Issue',
   'boards.timelineEmpty': 'Nothing to schedule yet',
@@ -1122,7 +1449,21 @@ export const en = {
   'filters.project': 'Project',
   'filters.unassigned': 'Unassigned',
   'filters.assignedToMe': 'Assigned to me',
+  'filters.creator': 'Creator',
+  'filters.createdByMe': 'Created by me',
   'filters.backlogItem': 'Backlog item',
+  'filters.createdDate': 'Created date',
+  'filters.solvedDate': 'Solved date',
+  'filters.dateFrom': 'From',
+  'filters.dateTo': 'To',
+  'filters.dateClear': 'Clear dates',
+  'filters.dateToday': 'Today',
+  'filters.dateYesterday': 'Yesterday',
+  'filters.dateThisWeek': 'This week',
+  'filters.dateLast7': 'Last 7 days',
+  'filters.dateLast30': 'Last 30 days',
+  'filters.dateThisMonth': 'This month',
+  'filters.dateLastMonth': 'Last month',
 
   'common.loading': 'Loading…',
   'common.none': 'None',
@@ -1243,16 +1584,20 @@ export const en = {
   'editor.toggleBodyPlaceholder': 'Hidden until you open it',
   'editor.selectImage': 'Select an image',
   'editor.selectVideo': 'Select a video',
+  'editor.insertLineAbove': 'Add a line above',
   'editor.uploading': 'Uploading…',
   'editor.uploadFailed': 'Upload failed — click to retry',
   'editor.resizeImage': 'Resize image',
   'editor.dragToResize': 'Drag to resize',
+  'editor.zoomImage': 'View full size',
   'editor.addBorder': 'Add border',
   'editor.removeBorder': 'Remove border',
   'editor.resizeColumn': 'Drag to resize column',
   'editor.resizeRow': 'Drag to resize row',
   'editor.diagramSource': 'Mermaid diagram source',
   'editor.diagramFailed': 'Could not draw this diagram',
+  'editor.diagramDrawing': 'Drawing…',
+  'editor.diagramHint': 'Flowchart or sequence, drawn as you type',
   'editor.enterCode': 'Enter code',
   'editor.strikethrough': 'Strikethrough',
   'editor.tableFitWidth': 'Fit to width',
@@ -1280,6 +1625,9 @@ export const en = {
   'enum.role.admin': 'Admin',
   'enum.role.tester': 'Tester',
   'enum.role.guest': 'Guest',
+  'enum.apiKeyScope.readOnly': 'Read-only',
+  'enum.apiKeyScope.readWrite': 'Read & write',
+  'enum.apiKeyScope.readWriteDelete': 'Read, write & delete',
   'enum.role.product': 'Product',
   'enum.role.developer': 'Developer',
 
@@ -1336,8 +1684,6 @@ export const en = {
   'enum.favouriteKind.issue': 'Issue',
   'enum.favouriteKind.doc': 'Doc',
 
-  'enum.relation.parentOf': 'Parent of',
-  'enum.relation.subIssueOf': 'Sub-issue of',
   'enum.relation.relatedTo': 'Related to',
   'enum.relation.blockedBy': 'Blocked by',
   'enum.relation.blocks': 'Blocking',
@@ -1410,6 +1756,34 @@ export const en = {
   'enum.webhookEvent.bugCreated': 'Bug created',
   'enum.webhookEvent.bugAssigned': 'Bug assigned',
   'enum.webhookEvent.commentMention': 'Comment mention',
+
+  'enum.prState.draft': 'Draft',
+  'enum.prState.open': 'Open',
+  'enum.prState.merged': 'Merged',
+  'enum.prState.closed': 'Closed',
+
+  'enum.ciState.pending': 'Running',
+  'enum.ciState.success': 'Passed',
+  'enum.ciState.failure': 'Failed',
+  'enum.ciState.error': 'Errored',
+
+  'code.development': 'Development',
+  'code.pullRequests': 'Pull requests',
+  'code.commits': 'Commits',
+  'code.noKindSelected': 'Pick pull requests or commits to list.',
+
+  // ⌘K command palette — create-action rows.
+  'palette.createTask': 'New task',
+  'palette.createBug': 'New bug',
+  'palette.placeholder': 'Search or jump to…',
+  'palette.empty': 'No results',
+  'palette.searchUnavailable': "Search is unavailable right now — you can still navigate below.",
+  'palette.groupIssues': 'Issues',
+  'palette.groupDocs': 'Docs',
+  'palette.groupRoadmap': 'Roadmap',
+  'palette.groupProjects': 'Projects',
+  'palette.groupReports': 'Reports',
+  'palette.groupTestCases': 'Test cases',
 } as const;
 
 export type I18nKey = keyof typeof en;

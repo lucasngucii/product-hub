@@ -3,8 +3,13 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { UniqueEntityID } from '@core/domain';
 import { BaseRepository } from '@core/infrastructure/database/mongoose/base';
-import { IRoadmapRepository } from '@application/roadmaps/repositories/roadmap.repository';
+import {
+  IRoadmapRepository,
+  RoadmapItemLocation,
+  RoadmapItemOwner,
+} from '@application/roadmaps/repositories/roadmap.repository';
 import { RoadmapEntity } from '@application/roadmaps/domain/entities/roadmap.entity';
+import { buildSearchText } from '@module-shared/utils/search-text.util';
 import { RoadmapDoc } from '../entities/roadmap.schema';
 
 @Injectable()
@@ -49,6 +54,8 @@ export class RoadmapRepository
       publicToken: roadmap.publicToken,
       createdAt: roadmap.createdAt,
       updatedAt: roadmap.updatedAt,
+      searchText: buildSearchText(roadmap.title, roadmap.description),
+      itemsSearchText: roadmap.items.map((i) => buildSearchText(i.title, i.shortId)),
     };
   }
 
@@ -63,6 +70,34 @@ export class RoadmapRepository
       .lean<RoadmapDoc>()
       .exec();
     return doc ? this.toDomain(doc) : null;
+  }
+
+  async findByItemId(tenantId: string, itemId: string): Promise<RoadmapItemOwner | null> {
+    if (!itemId) return null;
+    // Two scalars only, same discipline as `findItemByRef` below: this runs on
+    // every roadmap-item activity read and every issue read that links one, and
+    // a roadmap document can hold hundreds of items with long descriptions.
+    // `RoadmapSchema.index({ tenantId: 1, 'items.id': 1 })` is what keeps it
+    // from scanning every roadmap in the tenant to get here.
+    const doc = await this.model
+      .findOne({ tenantId, 'items.id': itemId })
+      .select('tenantId updatedAt')
+      .lean<{ tenantId: string; updatedAt: Date }>()
+      .exec();
+    return doc ? { tenantId: doc.tenantId, updatedAt: doc.updatedAt } : null;
+  }
+
+  async findItemByRef(tenantId: string, ref: string): Promise<RoadmapItemLocation | null> {
+    if (!ref) return null;
+    // Only the items array comes back — a roadmap can hold hundreds of items with
+    // long descriptions, and this read wants two ids from one of them.
+    const doc = await this.model
+      .findOne({ tenantId, 'items.shortId': ref })
+      .select('items.id items.shortId')
+      .lean<{ _id: string; items?: { id: string; shortId?: string }[] }>()
+      .exec();
+    const item = doc?.items?.find((i) => i.shortId === ref);
+    return item ? { roadmapId: doc!._id, itemId: item.id } : null;
   }
 
   async findByTenant(tenantId: string): Promise<RoadmapEntity[]> {

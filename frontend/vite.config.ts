@@ -57,9 +57,19 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
+    // Yjs must exist exactly once in the bundle. Two copies do not error — they
+    // simply fail to recognise each other's types, and collaborative editing
+    // goes quiet with no message anywhere. BlockNote and @hocuspocus/provider
+    // both depend on it, so the dedupe is stated rather than left to hoisting.
+    dedupe: ['yjs', 'y-protocols', 'y-prosemirror'],
   },
   server: {
     port: 3001,
     host: true,
+  },
+  test: {
+    environment: 'happy-dom',
+    include: ['src/**/*.spec.ts'],
+    setupFiles: ['./src/test/setup.ts'],
   },
 });

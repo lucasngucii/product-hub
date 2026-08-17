@@ -19,6 +19,8 @@ import { MentionMenu } from '@/lib/editor/MentionMenu';
 import { SlashMenu } from '@/lib/editor/SlashMenu';
 import { StrikeTool } from '@/lib/editor/StrikeTool';
 import { bindInlineShortcuts } from '@/lib/editor/inlineShortcuts';
+import { bindInsertLine } from '@/lib/editor/insertLine';
+import { bindBlockInputRules } from '@/lib/editor/inputRules';
 import { CommentTool } from '@/lib/editor/CommentTool';
 import { uploadMedia } from '@/features/uploads/api';
 import { useUsers } from '@/features/users/api';
@@ -26,11 +28,28 @@ import type { SlashPerson } from '@/lib/editor/SlashMenu';
 import { t } from '@/i18n';
 import '@/styles/rich-text-editor.css';
 import { useExternalLink } from './ExternalLink';
+import { useImageZoom } from './ImageZoom';
+
+/** A block to mount the editor with, ids included. */
+export interface EditorBlockSeed {
+  id?: string;
+  type: string;
+  data: Record<string, unknown>;
+}
 
 export interface RichTextEditorProps {
   /** Stored value as HTML (converted to/from Editor.js blocks internally). */
   value: string;
   onChange: (html: string) => void;
+  /**
+   * Mount with these blocks instead of parsing `value`.
+   *
+   * For the one caller that has block ids worth keeping: the collaborative doc
+   * body hands over the CRDT's blocks, so the ids every client shares are the
+   * ones Editor.js — and its undo history — hold from the first frame. Without
+   * it, the first undo would restore blocks under ids nobody else knows.
+   */
+  initialBlocks?: EditorBlockSeed[];
   placeholder?: string;
   minHeight?: number;
   /**
@@ -72,6 +91,13 @@ export interface RichTextEditorProps {
   onComment?: (range: Range) => void;
   /** Tooltip for that button — the editor has no opinion on the wording. */
   commentLabel?: string;
+  /**
+   * The Editor.js instance, once it's up. For a caller that has to drive the
+   * editor rather than just read its HTML — the collaborative doc body binds it
+   * to a CRDT (see `features/docs/collab`). Called once per mount, and again
+   * with `null` when that instance goes away.
+   */
+  onReady?: (editor: EditorJS | null) => void;
   className?: string;
 }
 
@@ -183,7 +209,7 @@ class MarkerWithChips extends Marker {
   }
 }
 
-function withFallbackBlocks(blocks: HtmlEditorBlock[]): HtmlEditorBlock[] {
+function withFallbackBlocks(blocks: EditorBlockSeed[]): EditorBlockSeed[] {
   return blocks.length > 0 ? blocks : [{ type: 'paragraph', data: { text: '' } }];
 }
 
@@ -202,6 +228,7 @@ function withFallbackBlocks(blocks: HtmlEditorBlock[]): HtmlEditorBlock[] {
 export function RichTextEditor({
   value,
   onChange,
+  initialBlocks,
   placeholder,
   minHeight,
   images = false,
@@ -212,11 +239,13 @@ export function RichTextEditor({
   autoFocus = false,
   onComment,
   commentLabel,
+  onReady,
   className,
 }: RichTextEditorProps) {
   const holderRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<EditorJS | null>(null);
   const initialValueRef = useRef(value);
+  const initialBlocksRef = useRef(initialBlocks);
   const lastEmittedRef = useRef(value);
   const onChangeRef = useRef(onChange);
   const placeholderRef = useRef(placeholder);
@@ -230,9 +259,15 @@ export function RichTextEditor({
   // every render of the page around it — so the tool reads it through a ref.
   const onCommentRef = useRef(onComment);
   onCommentRef.current = onComment;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
   const commentOnRef = useRef(!!onComment);
   const commentLabelRef = useRef(commentLabel);
   const links = useExternalLink();
+  // Hover an image while writing → a magnifier over its corner opens the same
+  // lightbox the read view does. A click can't be used here: in a contenteditable
+  // it belongs to the caret.
+  const imageZoom = useImageZoom(holderRef);
   // People the `@` and cell `/` menus can mention. Read through a ref because
   // the editor is built once on mount, well before this query resolves; the
   // query key is shared with every other member list, so it costs one request.
@@ -281,13 +316,17 @@ export function RichTextEditor({
     let mentionMenu: MentionMenu | null = null;
     let slashMenu: SlashMenu | null = null;
     let unbindShortcuts: (() => void) | null = null;
+    let unbindRules: (() => void) | null = null;
+    let unbindInsertLine: (() => void) | null = null;
     let rafId = 0;
 
     const initTimer = window.setTimeout(() => {
       if (cancelled || !holderRef.current) return;
       while (holder.firstChild) holder.removeChild(holder.firstChild);
 
-      const initialBlocks = withFallbackBlocks(htmlToBlocks(initialValueRef.current));
+      const initialBlocks = withFallbackBlocks(
+        initialBlocksRef.current ?? htmlToBlocks(initialValueRef.current),
+      );
       const instance = new EditorJS({
         holder,
         placeholder: placeholderRef.current,
@@ -428,6 +467,18 @@ export function RichTextEditor({
             });
             mentionMenu.bind(holder);
           }
+          // Bound after the menus, so an open menu still owns Enter and Tab:
+          // capture listeners on the same node run in the order they were added.
+          //  · `*`/`1.`/`[]` + space → a list, and Backspace out of a nested item;
+          unbindRules = bindBlockInputRules(holder, {
+            editor: instance,
+            onChange: () => void emitHtml(),
+          });
+          //  · a `+` on the seam above an image, which has no line to type on.
+          unbindInsertLine = bindInsertLine(holder, {
+            editor: instance,
+            onChange: () => void emitHtml(),
+          });
           if (autoFocusRef.current) {
             try {
               instance.focus(true);
@@ -444,6 +495,9 @@ export function RichTextEditor({
           } catch {
             /* ignore: undo is optional */
           }
+          // Last, so anyone driving the editor from outside gets it fully
+          // wired: menus bound, shortcuts live, history seeded.
+          onReadyRef.current?.(instance);
         })
         .catch(() => {
           /* ignore init races */
@@ -461,12 +515,17 @@ export function RichTextEditor({
       if (rafId) cancelAnimationFrame(rafId);
       observer?.disconnect();
       unbindShortcuts?.();
+      unbindRules?.();
+      unbindInsertLine?.();
       slashMenu?.destroy();
       mentionMenu?.destroy();
       const e = editor;
       editor = null;
       if (editorRef.current === e) editorRef.current = null;
       if (!e) return;
+      // Tell the outside the instance is gone *before* it is destroyed, so a
+      // binding can unsubscribe rather than write into a torn-down editor.
+      onReadyRef.current?.(null);
       e.isReady
         .then(() => {
           try {
@@ -489,6 +548,7 @@ export function RichTextEditor({
         onClick={onLinkClick}
         className={`rich-text-editor${className ? ` ${className}` : ''}`}
       />
+      {imageZoom.node}
       {links.node}
     </>
   );

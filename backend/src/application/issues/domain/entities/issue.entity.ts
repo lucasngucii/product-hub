@@ -8,8 +8,29 @@ import {
   BugStatus,
   IssueKind,
   TaskStatus,
+  isCompletedStatus,
 } from '../enums/issue.enums';
-import { IssueProps } from './issue.props';
+import { IssueAssignee, IssueProps } from './issue.props';
+
+/**
+ * Normalizes whatever a caller had into the canonical assignee list: the list if
+ * it was given, else the legacy single pair, else nobody. Blank ids and repeats
+ * are dropped — the same person can't be on an issue twice, and `''` is how
+ * "unassigned" is stored, not a person.
+ */
+function normalizeAssignees(
+  assignees: IssueAssignee[] | undefined,
+  legacyId?: string,
+  legacyName?: string,
+): IssueAssignee[] {
+  const list = assignees ?? (legacyId ? [{ id: legacyId, name: legacyName || '' }] : []);
+  const seen = new Set<string>();
+  return list.filter((a) => {
+    if (!a?.id || seen.has(a.id)) return false;
+    seen.add(a.id);
+    return true;
+  });
+}
 
 /**
  * An **Issue** — the unified piece of work that used to be a Task *or* a Bug. Its
@@ -31,6 +52,9 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
       ownerId?: string;
       parentId?: string;
       shortId?: string;
+      /** The sortable halves of a sequential `shortId`; absent on a legacy issue. */
+      refPrefix?: string;
+      refSeq?: number;
       title: string;
       description?: string;
       status?: string;
@@ -40,6 +64,9 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
       projectId?: string;
       cycleId?: string;
       carryOverCount?: number;
+      /** Everyone on it. A single `assigneeId`/`assigneeName` still works and is
+       *  read as a one-person list — that's how a legacy stored issue loads. */
+      assignees?: IssueAssignee[];
       assigneeId?: string;
       assigneeName?: string;
       createdBy: string;
@@ -61,6 +88,7 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
       order?: number;
       createdAt?: Date;
       updatedAt?: Date;
+      resolvedAt?: Date | null;
     },
     id?: UniqueEntityID,
   ): Result<IssueEntity> {
@@ -75,6 +103,8 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
 
     const isTask = props.kind === IssueKind.TASK;
     const now = new Date();
+    const assignees = normalizeAssignees(props.assignees, props.assigneeId, props.assigneeName);
+    const status = props.status ?? (isTask ? TaskStatus.TODO : BugStatus.OPEN);
     return Result.ok(
       new IssueEntity(
         {
@@ -85,17 +115,23 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
           ownerId: props.ownerId || '',
           parentId: props.parentId || '',
           shortId: props.shortId || '',
+          // Passed straight through, `undefined` and all: a legacy issue must keep
+          // both ABSENT rather than gain a '' / 0 that would sort as a real value.
+          refPrefix: props.refPrefix,
+          refSeq: props.refSeq,
           title: props.title.trim(),
           description: props.description?.trim() || '',
-          status: props.status ?? (isTask ? TaskStatus.TODO : BugStatus.OPEN),
+          status,
           roadmapId: props.roadmapId || '',
           roadmapItemId: props.roadmapItemId || '',
           roadmapItemLabel: props.roadmapItemLabel || '',
           projectId: props.projectId || '',
           cycleId: props.cycleId || '',
           carryOverCount: props.carryOverCount ?? 0,
-          assigneeId: props.assigneeId || '',
-          assigneeName: props.assigneeName || '',
+          assignees,
+          // The mirror is always `assignees[0]` — never passed through on its own.
+          assigneeId: assignees[0]?.id ?? '',
+          assigneeName: assignees[0]?.name ?? '',
           createdBy: props.createdBy,
           createdByName: props.createdByName || '',
           reporterId: props.reporterId || '',
@@ -119,6 +155,18 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
           order: props.order ?? 0,
           createdAt: props.createdAt || now,
           updatedAt: props.updatedAt || now,
+          // `undefined` means "not supplied" — a brand-new issue, so an issue
+          // created straight into a done column (the + Add on Resolved) is
+          // stamped now. A row loaded from the store always passes the field
+          // explicitly (`doc.resolvedAt ?? null`), so a pre-`resolvedAt` bug
+          // that is already resolved keeps its blank stamp instead of silently
+          // acquiring today's date the first time it is read and re-saved.
+          resolvedAt:
+            props.resolvedAt !== undefined
+              ? props.resolvedAt
+              : isCompletedStatus(props.kind, status)
+                ? now
+                : null,
         },
         id,
       ),
@@ -157,6 +205,12 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
   get shortId(): string {
     return this.props.shortId;
   }
+  get refPrefix(): string | undefined {
+    return this.props.refPrefix;
+  }
+  get refSeq(): number | undefined {
+    return this.props.refSeq;
+  }
   get title(): string {
     return this.props.title;
   }
@@ -184,6 +238,10 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
   get carryOverCount(): number {
     return this.props.carryOverCount;
   }
+  get assignees(): IssueAssignee[] {
+    return this.props.assignees;
+  }
+  /** The primary assignee's id — `assignees[0]`, kept as a field for old readers. */
   get assigneeId(): string {
     return this.props.assigneeId;
   }
@@ -246,6 +304,14 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
   }
   get updatedAt(): Date {
     return this.props.updatedAt;
+  }
+  /** When it became finished (`null` while open) — see {@link setStatus}. */
+  get resolvedAt(): Date | null {
+    return this.props.resolvedAt;
+  }
+  /** In a done column right now (resolved/closed for a bug, done for a task). */
+  get isCompleted(): boolean {
+    return isCompletedStatus(this.props.kind, this.props.status);
   }
 
   /**
@@ -318,8 +384,21 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
     this.touch();
   }
 
+  /**
+   * Move to another status column — and keep {@link resolvedAt} honest, since
+   * that stamp is the only record of *when* a bug was solved (the board's
+   * "Solved date" filter and any time-to-fix reading are built on it).
+   *
+   * Crossing **into** the done set stamps the moment; crossing back **out** — a
+   * reopen — clears it. Moving *within* the done set (resolved → closed) is not
+   * a new fix, so the original moment stands.
+   */
   setStatus(status: string): void {
+    const wasCompleted = this.isCompleted;
+    const nowCompleted = isCompletedStatus(this.props.kind, status);
     this.props.status = status;
+    if (nowCompleted && !wasCompleted) this.props.resolvedAt = new Date();
+    else if (!nowCompleted && wasCompleted) this.props.resolvedAt = null;
     this.touch();
   }
 
@@ -328,10 +407,23 @@ export class IssueEntity extends AggregateRoot<IssueProps> {
     this.touch();
   }
 
-  assign(userId: string, userName: string): void {
-    this.props.assigneeId = userId;
-    this.props.assigneeName = userName;
+  /**
+   * Put these people on it, in order — the first is the primary. This is the only
+   * way the assignee mirror moves, so `assigneeId` can't drift from the list.
+   * Pass `[]` to unassign.
+   */
+  setAssignees(assignees: IssueAssignee[]): void {
+    const next = normalizeAssignees(assignees);
+    this.props.assignees = next;
+    this.props.assigneeId = next[0]?.id ?? '';
+    this.props.assigneeName = next[0]?.name ?? '';
     this.touch();
+  }
+
+  /** Single-assignee shorthand kept for the callers that only ever have one
+   *  person (bulk bar, MCP, quick-add); `('', '')` unassigns. */
+  assign(userId: string, userName: string): void {
+    this.setAssignees(userId ? [{ id: userId, name: userName }] : []);
   }
 
   /** Commit to (or leave, with '') a team cycle. The use-case validates the

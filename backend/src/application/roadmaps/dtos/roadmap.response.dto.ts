@@ -18,7 +18,7 @@ export class RoadmapColumnDto {
 export class RoadmapItemDto {
   @ApiProperty() id: string;
   @ApiProperty({
-    example: 'RM-6HCUHKX',
+    example: 'RM-6',
     description: 'Human-friendly ref used in the item URL. Empty for legacy items.',
   })
   shortId: string;
@@ -34,6 +34,8 @@ export class RoadmapItemDto {
   @ApiProperty() progress: number;
   @ApiProperty() imageUrl: string;
   @ApiProperty() startDate: string;
+  @ApiProperty({ description: 'Target end date (YYYY-MM-DD), empty when unset' })
+  endDate: string;
   @ApiProperty({ type: [RoadmapItemAssigneeDto] }) assignees: RoadmapItemAssigneeDto[];
   @ApiProperty({ description: 'Derived RICE score' }) rice: number;
   @ApiProperty({ description: 'When the item was created (ISO)' }) createdAt: string;

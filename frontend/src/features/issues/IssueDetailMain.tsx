@@ -15,9 +15,11 @@ import { FavouriteKind, ReactionTargetType } from '@/types/enums';
 import { FavouriteButton } from '@/features/favourites/FavouriteButton';
 import { ReactionBar } from '@/features/reactions/ReactionBar';
 import { LinkedDocsSection } from '@/features/docs/components/LinkedDocsSection';
+import { CodeLinksSection } from '@/features/integrations/components/CodeLinksSection';
 import type { CommentDto } from '@/types/dto';
 import { type IssueSubject } from '@/features/activity/api';
-import { ActivityHeader, CommentThread, Avatar, type Person } from '@/features/activity/CommentThread';
+import { ActivityHeader, CommentThread, type Person } from '@/features/activity/CommentThread';
+import { Avatar } from '@/features/activity/Avatar';
 
 export interface IssueDetailMainProps {
   /** Which thread the comments belong to — routes + cache keys differ. */
@@ -219,6 +221,9 @@ export function IssueDetailMain({
               placeholder={descriptionPlaceholder}
               minHeight={80}
               images
+              // `@` names a person in the description the same way it does in a
+              // comment. The chip is a reference, not a ping — only comments notify.
+              mentions
               className="border-0"
             />
           </>
@@ -241,6 +246,12 @@ export function IssueDetailMain({
       {/* Optional inset (task detail's Sub-tasks) between description and Activity. */}
       {beforeActivity}
 
+      {/* Commits and pull requests that named this issue's ref. Lives here rather
+          than in each page so task detail and bug detail get it identically.
+          `comments` means the public read-only view, which has no token to read
+          an authed endpoint with — passing no id keeps it from trying. */}
+      <CodeLinksSection subjectId={comments ? undefined : issueId} className="mt-8" />
+
       {/* Doc pages written about this issue — the other end of a page's
           "Link Task or Doc". Renders nothing when there are none. */}
       <LinkedDocsSection refId={issueId} className="mt-8" />
@@ -250,17 +261,6 @@ export function IssueDetailMain({
         <ActivityHeader />
 
         <div className="flex flex-col gap-5">
-          {/* System event — the issue's creation opens the timeline. */}
-          <div className="flex items-center gap-3 text-sm">
-            <Avatar name={createdByName} />
-            <span className="text-muted-foreground">
-              <span className="font-medium text-foreground">
-                {createdByName || t('tasks.someone')}
-              </span>{' '}
-              {createdLabel} · {timeAgo(createdAt)}
-            </span>
-          </div>
-
           <CommentThread
             source={subject === 'bug' ? { kind: 'bug', id: issueId } : { kind: 'task', id: issueId }}
             users={users}
@@ -268,6 +268,21 @@ export function IssueDetailMain({
             isAdmin={isAdmin}
             currentUserId={currentUserId}
             comments={comments}
+            // The issue's creation opens the change log, so it lives in the
+            // Activity tab — not above both tabs, where it would sit on top of a
+            // conversation it isn't part of. Rendered here rather than read from
+            // the activity feed because a public viewer can't fetch that feed.
+            activityLead={
+              <div className="flex items-center gap-3 text-sm">
+                <Avatar name={createdByName} />
+                <span className="text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {createdByName || t('tasks.someone')}
+                  </span>{' '}
+                  {createdLabel} · {timeAgo(createdAt)}
+                </span>
+              </div>
+            }
           />
         </div>
       </section>

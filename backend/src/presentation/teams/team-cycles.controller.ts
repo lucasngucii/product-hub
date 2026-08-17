@@ -12,7 +12,10 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AuthUser, Roles } from '@core/decorators';
 import { JwtPayload, Role } from '@core/interfaces';
 import { EntityNotFoundException } from '@core/exceptions';
-import { TEAM_NOT_FOUND } from '@application/teams/use-cases/team.use-cases';
+import {
+  ResolveTeamPrefixLockUseCase,
+  TEAM_NOT_FOUND,
+} from '@application/teams/use-cases/team.use-cases';
 import { TeamResponseDto } from '@application/teams/dtos/team.dtos';
 import { TeamMapper } from '@application/teams/mappers/team.mapper';
 import {
@@ -44,6 +47,7 @@ export class TeamCyclesController {
     private readonly updateCycle: UpdateCycleUseCase,
     private readonly deleteCycle: DeleteCycleUseCase,
     private readonly updateConfig: UpdateTeamCycleConfigUseCase,
+    private readonly prefixLock: ResolveTeamPrefixLockUseCase,
   ) {}
 
   @Get(':teamId/cycles')
@@ -122,7 +126,15 @@ export class TeamCyclesController {
     @Param('teamId') teamId: string,
     @Param('cycleId') cycleId: string,
   ): Promise<{ ok: true }> {
-    const result = await this.deleteCycle.execute({ tenantId: auth.tenantId, teamId, cycleId });
+    const result = await this.deleteCycle.execute({
+      tenantId: auth.tenantId,
+      teamId,
+      cycleId,
+      // The issues that fall out of the deleted cycle get a history row each,
+      // attributed to whoever deleted it.
+      requesterId: auth.userId,
+      requesterName: auth.name,
+    });
     if (result.isFailure) {
       const msg = result.error as string;
       if (msg === TEAM_NOT_FOUND || msg === CYCLE_NOT_FOUND) throw new EntityNotFoundException(msg);
@@ -141,12 +153,24 @@ export class TeamCyclesController {
     @Param('teamId') teamId: string,
     @Body() dto: UpdateTeamCycleConfigDto,
   ): Promise<TeamResponseDto> {
-    const result = await this.updateConfig.execute({ tenantId: auth.tenantId, teamId, dto });
+    const result = await this.updateConfig.execute({
+      tenantId: auth.tenantId,
+      teamId,
+      dto,
+      // A rhythm change or a disable detaches issues wholesale — same rows,
+      // same author.
+      requesterId: auth.userId,
+      requesterName: auth.name,
+    });
     if (result.isFailure) {
       const msg = result.error as string;
       if (msg === TEAM_NOT_FOUND) throw new EntityNotFoundException(msg);
       throw new BadRequestException(msg);
     }
-    return TeamMapper.toResponseDto(result.getValue());
+    // This returns the whole team, and Settings renders the prefix input from the
+    // same object — so the lock must be resolved here too. Leaving it at the
+    // mapper default would offer an edit the API then rejects.
+    const team = result.getValue();
+    return TeamMapper.toResponseDto(team, await this.prefixLock.one(auth.tenantId, team));
   }
 }

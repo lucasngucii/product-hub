@@ -90,7 +90,10 @@ export class IssuesController {
       isAdmin: auth.role === Role.ADMIN,
     });
     if (result.isFailure) throw new EntityNotFoundException(result.error as string);
-    return IssueMapper.toResponseDto(result.getValue());
+    // The one read that carries the parent, so a detail page can name it rather
+    // than showing a sub-issue as if it were top-level.
+    const { issue, parent } = result.getValue();
+    return IssueMapper.toResponseDto(issue, parent);
   }
 
   @Patch(':id')
@@ -105,6 +108,7 @@ export class IssuesController {
       id,
       tenantId: auth.tenantId,
       requesterId: auth.userId,
+      requesterName: auth.name,
       isAdmin: auth.role === Role.ADMIN,
       dto,
     });
@@ -124,6 +128,7 @@ export class IssuesController {
       id,
       tenantId: auth.tenantId,
       requesterId: auth.userId,
+      requesterName: auth.name,
       isAdmin: auth.role === Role.ADMIN,
       status: dto.status,
     });
@@ -142,6 +147,7 @@ export class IssuesController {
       id,
       tenantId: auth.tenantId,
       requesterId: auth.userId,
+      requesterName: auth.name,
       isAdmin: auth.role === Role.ADMIN,
       // Bugs were admin/product-only to delete; tasks stay deletable by the broader
       // board-write roles (their owner-or-admin check is enforced in the use-case).

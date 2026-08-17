@@ -1,9 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { UniqueEntityID } from '@core/domain';
 import { IUsecaseExecute } from '@core/interfaces';
 import { Result } from '@shared/logic/result';
-import { keepOrUpgradeShareToken, uniqueRef } from '@module-shared/utils/short-id.util';
+import { keepOrUpgradeShareToken } from '@module-shared/utils/short-id.util';
+import { sequentialRef } from '@module-shared/utils/sequential-ref.util';
+import { CounterService } from '@module-shared/services/counter.service';
 import { ICommentRepository } from '@application/activity/repositories/comment.repository';
-import { CreateDocDto, UpdateDocDto } from '../dtos/doc.dtos';
+import { AuditActor, AuditEntity } from '@application/audit-log/domain/enums/audit.enums';
+import { RecordActivityUseCase } from '@application/audit-log/use-cases/record-activity.use-case';
+import { CreateDocDto, DuplicateDocDto, UpdateDocDto } from '../dtos/doc.dtos';
 import { DOC_REF_PREFIX } from '../domain/entities/doc.props';
 import { DocEntity } from '../domain/entities/doc.entity';
 import { DocPageEntity } from '../domain/entities/doc-page.entity';
@@ -23,6 +28,20 @@ export interface DocWithCount {
   pageCount: number;
 }
 
+/** Both the DTO and the schema cap a title here. */
+const MAX_TITLE = 160;
+
+/**
+ * `<title> (copy)`, kept inside the cap. A title already at the limit would push
+ * the suffix past it and the write would be rejected by Mongo — so the tail of
+ * the name gives way instead, since the suffix is the part that says what this is.
+ */
+function copyTitle(title: string): string {
+  const suffix = ' (copy)';
+  if (title.length + suffix.length <= MAX_TITLE) return `${title}${suffix}`;
+  return `${title.slice(0, MAX_TITLE - suffix.length).trimEnd()}${suffix}`;
+}
+
 @Injectable()
 export class CreateDocUseCase
   implements
@@ -34,20 +53,38 @@ export class CreateDocUseCase
   constructor(
     @Inject(IDocRepository) private readonly docs: IDocRepository,
     @Inject(IDocPageRepository) private readonly pages: IDocPageRepository,
+    private readonly counters: CounterService,
+    private readonly activity: RecordActivityUseCase,
   ) {}
 
   async execute({
     tenantId,
     author,
+    actorType,
     dto,
   }: {
     tenantId: string;
     author: { userId: string; name: string };
+    /** Defaults to USER. MCP passes API so a bot is distinguishable from a person. */
+    actorType?: AuditActor;
     dto: CreateDocDto;
   }): Promise<Result<DocWithPages>> {
+    // `sequentialRef` throws if it cannot find a free number; this use-case's
+    // contract is a Result, so the throw is turned into one here rather than
+    // escaping as a 500.
+    let ref: string;
+    try {
+      ref = (
+        await sequentialRef(this.counters, tenantId, DOC_REF_PREFIX, (r) =>
+          this.docs.refExists(tenantId, r),
+        )
+      ).ref;
+    } catch (error) {
+      return Result.fail((error as Error).message);
+    }
     const created = DocEntity.create({
       tenantId,
-      ref: await uniqueRef(DOC_REF_PREFIX, (ref) => this.docs.refExists(tenantId, ref)),
+      ref,
       title: dto.title,
       icon: dto.icon,
       color: dto.color,
@@ -75,7 +112,173 @@ export class CreateDocUseCase
     const page = firstPage.getValue();
     await this.pages.save(page);
 
+    // The same `created` row CreateDocPageUseCase writes for page 2 onward.
+    // Without it a brand-new doc opened on a page with an empty timeline while
+    // every page added afterwards had one — which reads as broken, not as "no
+    // history yet".
+    await this.activity.execute({
+      tenantId,
+      entity: AuditEntity.DOC_PAGE,
+      entityId: page.id.toString(),
+      entityRef: page.title,
+      actor: { type: actorType ?? AuditActor.USER, id: author.userId, name: author.name },
+      changes: [{ field: 'created', oldValue: '', newValue: '' }],
+    });
+
     return Result.ok({ doc, pages: [page] });
+  }
+}
+
+/**
+ * Copy a doc and every page in it — the whole tree, in one go.
+ *
+ * What travels is the writing: each page's body, its symbol and cover, its files
+ * and its Page Styles, in the same nesting and the same order. What deliberately
+ * does not: the share link, the version history, the comment threads and the
+ * links to issues / roadmap items. Each of those is a statement about the
+ * *original* — a granted URL, a record of how those words got there, a
+ * conversation anchored in them, a claim on a work item — and re-issuing it for a
+ * copy is not what "duplicate" asks for. See the notes at each one below.
+ */
+@Injectable()
+export class DuplicateDocUseCase
+  implements
+    IUsecaseExecute<
+      {
+        id: string;
+        tenantId: string;
+        author: { userId: string; name: string };
+        dto: DuplicateDocDto;
+      },
+      Result<DocWithPages>
+    >
+{
+  constructor(
+    @Inject(IDocRepository) private readonly docs: IDocRepository,
+    @Inject(IDocPageRepository) private readonly pages: IDocPageRepository,
+    private readonly counters: CounterService,
+    private readonly activity: RecordActivityUseCase,
+  ) {}
+
+  async execute({
+    id,
+    tenantId,
+    author,
+    dto,
+  }: {
+    id: string;
+    tenantId: string;
+    author: { userId: string; name: string };
+    dto: DuplicateDocDto;
+  }): Promise<Result<DocWithPages>> {
+    // `id` is whatever the URL carried — a `DOC-…` ref or the uuid.
+    const source = await this.docs.findByIdOrRef(tenantId, id);
+    if (!source || source.tenantId !== tenantId) return Result.fail('Doc not found');
+
+    // The copy draws its own number; see CreateDocUseCase for the throw → Result.
+    let ref: string;
+    try {
+      ref = (
+        await sequentialRef(this.counters, tenantId, DOC_REF_PREFIX, (r) =>
+          this.docs.refExists(tenantId, r),
+        )
+      ).ref;
+    } catch (error) {
+      return Result.fail((error as Error).message);
+    }
+    const created = DocEntity.create({
+      tenantId,
+      ref,
+      title: dto.title?.trim() || copyTitle(source.title),
+      icon: source.icon,
+      color: source.color,
+      coverUrl: source.coverUrl,
+      tags: source.tags,
+      // The copy belongs to whoever made it, not to whoever wrote the original.
+      createdBy: author.userId,
+      createdByName: author.name,
+      // Sharing stays off (the entity's default): a share token is an access
+      // grant handed out for one doc, and minting a second public URL for the
+      // same words — silently, from a menu item — is not something to infer.
+    });
+    if (created.isFailure) return Result.fail(created.error as string);
+    const doc = created.getValue();
+    const docId = doc.id.toString();
+
+    const sourcePages = await this.pages.findByDoc(source.id.toString());
+    // Every new id first, so a child's `parentId` can be remapped in a single
+    // pass. A parent that isn't in the map (an orphaned page) lands at top level
+    // rather than pointing back into the doc we copied from.
+    const newIds = new Map(sourcePages.map((p) => [p.id.toString(), new UniqueEntityID()]));
+
+    const copies: DocPageEntity[] = [];
+    for (const page of sourcePages) {
+      const copy = DocPageEntity.create(
+        {
+          tenantId,
+          docId,
+          parentId: newIds.get(page.parentId)?.toString() ?? '',
+          title: page.title,
+          icon: page.icon,
+          color: page.color,
+          coverUrl: page.coverUrl,
+          content: page.content,
+          // Files come along: an attachment is part of the writing. Both pages
+          // point at the same stored upload — nothing is copied in the bucket,
+          // and removing the chip from one leaves the other's alone.
+          attachments: page.attachments,
+          // `links` are left behind on purpose. A link is the original page's
+          // claim on an issue or a roadmap item; copying it would put a second,
+          // identical row in that record's Docs section for somebody else to
+          // clean up. Link the copy from the copy if that's what was meant.
+          style: {
+            fontStyle: page.fontStyle,
+            fontSize: page.fontSize,
+            pageWidth: page.pageWidth,
+            showCover: page.showCover,
+            showTitle: page.showTitle,
+            showUpdated: page.showUpdated,
+            showLinks: page.showLinks,
+            showAttachments: page.showAttachments,
+          },
+          order: page.order,
+          createdBy: author.userId,
+          updatedBy: author.userId,
+          updatedByName: author.name,
+        },
+        newIds.get(page.id.toString()),
+      );
+      if (copy.isFailure) return Result.fail(copy.error as string);
+      copies.push(copy.getValue());
+    }
+
+    // The doc lands first: a page whose doc doesn't exist is unreachable, while
+    // a doc that briefly holds no pages just reads as empty.
+    await this.docs.save(doc);
+    await this.pages.saveMany(copies);
+
+    // A copy starts with a clean history — but "clean" still has to mean one
+    // `created` row per page, the same as any other new page. One shared
+    // timestamp so the whole duplication groups as one action. The rows are
+    // `automated` because the user asked for a doc, not for N pages.
+    const at = new Date();
+    for (const copy of copies) {
+      await this.activity.execute({
+        tenantId,
+        entity: AuditEntity.DOC_PAGE,
+        entityId: copy.id.toString(),
+        entityRef: copy.title,
+        actor: { type: AuditActor.USER, id: author.userId, name: author.name },
+        automated: true,
+        at,
+        changes: [{ field: 'created', oldValue: '', newValue: '' }],
+      });
+    }
+    // Version history and comment threads stay with the pages they were written
+    // against — a copy starts with a clean history and no open threads. So does
+    // its collaborative session: a new page id is a new room, which seeds itself
+    // from the HTML above the first time somebody opens it.
+    return Result.ok({ doc, pages: copies });
   }
 }
 
@@ -146,25 +349,65 @@ export class UpdateDocUseCase
 
 @Injectable()
 export class DeleteDocUseCase
-  implements IUsecaseExecute<{ id: string; tenantId: string }, Result<void>>
+  implements
+    IUsecaseExecute<
+      { id: string; tenantId: string; author: { userId: string; name: string } },
+      Result<void>
+    >
 {
   constructor(
     @Inject(IDocRepository) private readonly docs: IDocRepository,
     @Inject(IDocPageRepository) private readonly pages: IDocPageRepository,
     @Inject(IDocPageVersionRepository) private readonly versions: IDocPageVersionRepository,
     @Inject(ICommentRepository) private readonly comments: ICommentRepository,
+    private readonly activity: RecordActivityUseCase,
   ) {}
 
-  async execute({ id, tenantId }: { id: string; tenantId: string }): Promise<Result<void>> {
+  async execute({
+    id,
+    tenantId,
+    author,
+  }: {
+    id: string;
+    tenantId: string;
+    author: { userId: string; name: string };
+  }): Promise<Result<void>> {
     const doc = await this.docs.findByIdOrRef(tenantId, id);
     if (!doc || doc.tenantId !== tenantId) return Result.fail('Doc not found');
     // Everything below is keyed by the uuid, never the ref.
     const docId = doc.id.toString();
+    // Snapshot BEFORE the delete: the rows have to outlive the pages, and after
+    // `deleteByDoc` there is nothing left to name them with.
+    const doomed = (await this.pages.findByDoc(docId)).map((p) => ({
+      id: p.id.toString(),
+      title: p.title,
+    }));
     // Pages first: a doc without pages is recoverable noise, orphan pages are not.
     await this.pages.deleteByDoc(docId);
     await this.versions.deleteByDoc(docId);
     await this.comments.deleteByDoc(tenantId, docId);
     await this.docs.delete(docId);
+
+    // A page is a tracked entity; the doc that holds it is not. So unlike
+    // DeleteDocPageUseCase — which logs the page acted on and lets its
+    // descendants ride along on that row — there is no container row to hang
+    // this on, and logging nothing would end every page's timeline mid-
+    // sentence. One `deleted` row per page, sharing a timestamp, marked
+    // `automated`: the user deleted a doc, not N pages.
+    const at = new Date();
+    for (const page of doomed) {
+      await this.activity.execute({
+        tenantId,
+        entity: AuditEntity.DOC_PAGE,
+        entityId: page.id,
+        entityRef: page.title,
+        actor: { type: AuditActor.USER, id: author.userId, name: author.name },
+        automated: true,
+        at,
+        changes: [{ field: 'deleted', oldValue: '', newValue: '' }],
+      });
+    }
+
     return Result.ok();
   }
 }

@@ -149,12 +149,15 @@ export enum DocPageWidth {
 export const REACTION_EMOJIS = ['👍', '❤️', '🎉', '😄', '🚀', '👀'] as const;
 export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
 
-/** How two same-type issues relate — the "Mark as" options (mirrors the backend). */
+/**
+ * How two issues relate *as peers* — the "Mark as" options (mirrors the backend).
+ * Parent/child is deliberately not here: nesting is the child's `parentId`, set
+ * from the Sub-tasks section, so there is exactly one parent and one place that
+ * says so.
+ */
 export enum RelationType {
   BLOCKS = 'blocks',
   BLOCKED_BY = 'blocked_by',
-  PARENT_OF = 'parent_of',
-  SUB_ISSUE_OF = 'sub_issue_of',
   RELATED_TO = 'related_to',
   DUPLICATE_OF = 'duplicate_of',
 }
@@ -174,12 +177,32 @@ export enum McpEntity {
   BUG = 'bug',
   BACKLOG_ITEM = 'backlog-item',
   DOC = 'doc',
+  COMMENT = 'comment',
 }
 
-/** The six relation options in "Mark as" menu order (matches the mockup). */
+/** What an API key may do through MCP — a ceiling independent of the owner's
+ *  role. New keys default to read-only; a higher scope must be chosen to write. */
+export enum ApiKeyScope {
+  READ_ONLY = 'read-only',
+  READ_WRITE = 'read-write',
+  READ_WRITE_DELETE = 'read-write-delete',
+}
+
+/** Widest-to-narrowest is not meaningful for display order; least-privilege first. */
+export const API_KEY_SCOPES: ApiKeyScope[] = [
+  ApiKeyScope.READ_ONLY,
+  ApiKeyScope.READ_WRITE,
+  ApiKeyScope.READ_WRITE_DELETE,
+];
+
+export const API_KEY_SCOPE_LABEL: Record<ApiKeyScope, string> = {
+  [ApiKeyScope.READ_ONLY]: t('enum.apiKeyScope.readOnly'),
+  [ApiKeyScope.READ_WRITE]: t('enum.apiKeyScope.readWrite'),
+  [ApiKeyScope.READ_WRITE_DELETE]: t('enum.apiKeyScope.readWriteDelete'),
+};
+
+/** The four relation options in "Mark as" menu order (matches the mockup). */
 export const RELATION_TYPES: RelationType[] = [
-  RelationType.PARENT_OF,
-  RelationType.SUB_ISSUE_OF,
   RelationType.RELATED_TO,
   RelationType.BLOCKED_BY,
   RelationType.BLOCKS,
@@ -188,8 +211,6 @@ export const RELATION_TYPES: RelationType[] = [
 
 /** Verb form, used in the "Mark as" menu and the relation row ("Blocked by PRO-13"). */
 export const RELATION_TYPE_LABEL: Record<RelationType, string> = {
-  [RelationType.PARENT_OF]: t('enum.relation.parentOf'),
-  [RelationType.SUB_ISSUE_OF]: t('enum.relation.subIssueOf'),
   [RelationType.RELATED_TO]: t('enum.relation.relatedTo'),
   [RelationType.BLOCKED_BY]: t('enum.relation.blockedBy'),
   [RelationType.BLOCKS]: t('enum.relation.blocks'),
@@ -800,3 +821,74 @@ export const WEBHOOK_EVENT_LABEL: Record<WebhookEvent, string> = {
   [WebhookEvent.BUG_ASSIGNED]: t('enum.webhookEvent.bugAssigned'),
   [WebhookEvent.COMMENT_MENTION]: t('enum.webhookEvent.commentMention'),
 };
+
+/** What a piece of linked work is (Development panel). */
+export enum CodeLinkKind {
+  COMMIT = 'commit',
+  PULL_REQUEST = 'pull_request',
+}
+
+/** What a link points at — an issue (task/bug), or a backlog item. */
+export enum CodeLinkSubject {
+  ISSUE = 'issue',
+  ROADMAP_ITEM = 'roadmap_item',
+}
+
+/** A pull request's state, already collapsed from GitHub's three flags. */
+export enum PullRequestState {
+  DRAFT = 'draft',
+  OPEN = 'open',
+  MERGED = 'merged',
+  CLOSED = 'closed',
+}
+
+export const PULL_REQUEST_STATE_LABEL: Record<PullRequestState, string> = {
+  [PullRequestState.DRAFT]: t('enum.prState.draft'),
+  [PullRequestState.OPEN]: t('enum.prState.open'),
+  [PullRequestState.MERGED]: t('enum.prState.merged'),
+  [PullRequestState.CLOSED]: t('enum.prState.closed'),
+};
+
+/** Chip colours for a PR state. GitHub's own palette is the one developers read
+ *  without thinking — purple *is* merged — so these are literals rather than
+ *  theme tokens, the same exception the Kanban column dots make. */
+export const PULL_REQUEST_STATE_COLOR: Record<PullRequestState, string> = {
+  [PullRequestState.DRAFT]: '#6b7280',
+  [PullRequestState.OPEN]: '#16a34a',
+  [PullRequestState.MERGED]: '#8250df',
+  [PullRequestState.CLOSED]: '#dc2626',
+};
+
+/** What CI last said about a linked commit or pull request. GitHub's four
+ *  commit-status states, relayed through the webhook. */
+export enum CodeLinkCiState {
+  PENDING = 'pending',
+  SUCCESS = 'success',
+  FAILURE = 'failure',
+  ERROR = 'error',
+}
+
+export const CODE_LINK_CI_STATE_LABEL: Record<CodeLinkCiState, string> = {
+  [CodeLinkCiState.PENDING]: t('enum.ciState.pending'),
+  [CodeLinkCiState.SUCCESS]: t('enum.ciState.success'),
+  [CodeLinkCiState.FAILURE]: t('enum.ciState.failure'),
+  [CodeLinkCiState.ERROR]: t('enum.ciState.error'),
+};
+
+/** Same palette rule as the PR chips above: GitHub's own colours, because the
+ *  yellow-dot / green-tick vocabulary is already in the reader's head. */
+export const CODE_LINK_CI_STATE_COLOR: Record<CodeLinkCiState, string> = {
+  [CodeLinkCiState.PENDING]: '#bf8700',
+  [CodeLinkCiState.SUCCESS]: '#16a34a',
+  [CodeLinkCiState.FAILURE]: '#dc2626',
+  [CodeLinkCiState.ERROR]: '#dc2626',
+};
+
+/** Where the issue ref was found — a commit message, a branch, a PR title, or
+ *  (pull requests only) a commit inside the PR rather than the PR's own text. */
+export enum CodeLinkMatchedBy {
+  MESSAGE = 'message',
+  BRANCH = 'branch',
+  TITLE = 'title',
+  COMMIT = 'commit',
+}

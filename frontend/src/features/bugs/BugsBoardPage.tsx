@@ -2,22 +2,25 @@ import { useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { CalendarRange, LayoutGrid, List } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
-import { Badge, Button, Checkbox } from '@/components/ui';
+import { Button, Checkbox } from '@/components/ui';
+import { AssigneeBadge } from '@/components/AssigneeBadge';
 import { BoardSkeleton, ListSkeleton, TimelineSkeleton } from '@/components/Skeletons';
 import { cn } from '@/lib/utils';
 import { t } from '@/i18n';
 import { BOARD_GUTTER, IssueBoardLayout } from '@/components/IssueBoardLayout';
 import { IssueTimelineView } from '@/features/issues/IssueTimelineView';
+import { SortMenu } from '@/features/issues/SortMenu';
+import { useIssueSort } from '@/features/issues/useIssueSort';
 import { Icon } from '@/components/Icon';
 import { BackLink } from '@/components/BackLink';
 import { BoardCard, BoardCardAge, KanbanBoard, KanbanCardToolbar } from '@/components/KanbanBoard';
 import { LabelChips } from '@/features/labels/LabelChips';
 import {
   FilterMenu,
-  UNASSIGNED,
   type FilterCategory,
   type FilterSelections,
 } from '@/components/FilterMenu';
+import { issueSharedFilterParams, issueSharedFilters } from '@/features/issues/issueFilters';
 import { useUsers } from '@/features/users/api';
 import { useProjects } from '@/features/projects/api';
 import {
@@ -29,7 +32,7 @@ import {
   TeamIssueType,
 } from '@/types/enums';
 import type { TaskLabelConfig } from '@/types/enums';
-import type { BugDto, TeamDto } from '@/types/dto';
+import type { BugDto, CycleDto, TeamDto } from '@/types/dto';
 import { useBugs, useDeleteBug, useSetBugStatus } from './api';
 import { useTeamStatuses, useTeamLabelsLookup } from '@/features/teams/api';
 import { TeamShareMenu } from '@/features/teams/TeamShareMenu';
@@ -38,15 +41,12 @@ import {
   CycleBoardBanner,
   CycleChip,
   CycleFilterSelect,
+  IssueCycleChip,
 } from '@/features/cycles/CycleControls';
-import { useCycles, useFocusedCycle, useResolvedCycleId } from '@/features/cycles/api';
+import { useCycleLookup, useCycles, useFocusedCycle, useResolvedCycleId } from '@/features/cycles/api';
 import { CycleInsightsButton } from '@/features/cycles/CycleInsights';
 import { useIssueSelection, type IssueSelection } from '@/features/issues/useIssueSelection';
-import {
-  BulkActionBar,
-  buildAssigneeOptions,
-  buildCycleOptions,
-} from '@/features/issues/BulkActionBar';
+import { BulkActionBar, buildCycleOptions } from '@/features/issues/BulkActionBar';
 
 /** Severity → dot color (shadcn semantic tokens). */
 const SEVERITY_DOT: Record<BugSeverity, string> = {
@@ -62,10 +62,14 @@ const SEVERITY_DOT: Record<BugSeverity, string> = {
 export function BugCard({
   bug,
   labels,
+  cycle,
   overlay = false,
 }: {
   bug: BugDto;
   labels?: TaskLabelConfig[];
+  /** The cycle this bug is committed to, resolved by the board (`useCycleLookup`)
+   *  — a hook per card isn't legal and the rows can span teams. */
+  cycle?: CycleDto;
   overlay?: boolean;
 }) {
   return (
@@ -74,11 +78,16 @@ export function BugCard({
       titleDotColor={BUG_SEVERITY_COLOR[bug.severity]}
       titleDotLabel={BUG_SEVERITY_LABEL[bug.severity]}
       title={bug.title}
-      labels={<LabelChips keys={bug.labelKeys} labels={labels} />}
+      labels={
+        // Cycle first, like the roadmap card: "when" is what you scan a board for.
+        // Wraps — a card is narrow and a half-clipped chip reads as broken.
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          <IssueCycleChip cycle={cycle} />
+          <LabelChips keys={bug.labelKeys} labels={labels} />
+        </div>
+      }
       metaLeading={
-        <Badge variant="muted" className="max-w-full truncate">
-          {bug.assigneeName || t('bugs.unassigned')}
-        </Badge>
+        <AssigneeBadge assignees={bug.assignees} unassignedLabel={t('bugs.unassigned')} />
       }
       metaTrailing={
         <>
@@ -123,6 +132,13 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
     else next.set('view', v);
     setParams(next, { replace: true });
   };
+  const isList = view === 'list';
+  // List-view ordering only (see `SortMenu`), and opt-in: until the user picks
+  // one, neither param is sent, so board, timeline and a fresh list all keep the
+  // ordering they have today. It rides in ?sort=&dir= like `view` above, so a
+  // reload or a shared link keeps it. Severity is a real field here — every row
+  // is a bug — so the URL is allowed to carry it.
+  const [sort, setSort] = useIssueSort({ severity: true });
   // Cycle scope rides in ?cycle= (an id or current/upcoming/none — the API
   // resolves the sentinels against this team, so the sidebar's saved links stay
   // valid as cycles roll). Only meaningful on a team board.
@@ -175,7 +191,6 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
   const bulkEnabled = !!teamId && canWrite;
   const cyclesEnabled = !!shareTeam?.cyclesEnabled;
   const { data: cyclesData } = useCycles(cyclesEnabled ? teamId : undefined);
-  const assigneeOptions = buildAssigneeOptions(user, usersData?.items);
   const cycleOptions = cyclesEnabled ? buildCycleOptions(cyclesData) : undefined;
 
   const { data, isLoading } = useBugs({
@@ -183,11 +198,17 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
     search: search || undefined,
     status: filters.status as BugStatus[] | undefined,
     severity: filters.severity as BugSeverity[] | undefined,
-    assigneeId: filters.assigneeId,
+    // Assignee, creator and the two date windows — the block every board shares.
+    ...issueSharedFilterParams(filters),
     // A ?projectId= in the URL scopes the whole board; the filter narrows within it.
     projectId: projectId ? [projectId] : filters.projectId,
     cycleId: teamId ? cycleParam || undefined : undefined,
     caseId,
+    // Only the list view orders itself. Sending `sort` makes the API drop the
+    // stored `order`, so the board (whose order *is* the drag position) and the
+    // timeline must send neither param.
+    sort: isList && sort ? sort.field : undefined,
+    dir: isList && sort ? sort.dir : undefined,
   });
 
   const filterCategories: FilterCategory[] = [
@@ -205,20 +226,6 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
         color: BUG_SEVERITY_COLOR[s],
       })),
     },
-    {
-      id: 'assigneeId',
-      label: t('filters.assignee'),
-      searchable: true,
-      options: [
-        // Everyone gets a self-filter first — the people list below is
-        // manager-only, so without this a member can't filter to their own bugs.
-        ...(user ? [{ id: user.id, label: t('filters.assignedToMe') }] : []),
-        { id: UNASSIGNED, label: t('filters.unassigned') },
-        ...(usersData?.items ?? [])
-          .filter((u) => u.id !== user?.id)
-          .map((u) => ({ id: u.id, label: u.name })),
-      ],
-    },
     // Already scoped by the URL — a project filter would be redundant.
     ...(projectId
       ? []
@@ -228,11 +235,17 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
             label: t('filters.project'),
             searchable: true,
             options: (projectsData?.items ?? []).map((p) => ({ id: p.id, label: p.title })),
-          },
+          } satisfies FilterCategory,
         ]),
+    // Assignee · creator · created date · solved date — identical on every board.
+    ...issueSharedFilters({ user, users: usersData?.items }),
   ];
 
   const bugs = data?.items ?? [];
+  // Each card names its own cycle — at the default all-cycles scope that's the
+  // only place it's stated. Resolved per-row like the labels, and scoped to the
+  // teams actually on this board (the standalone /bugs route spans teams).
+  const cycleFor = useCycleLookup(bugs.map((b) => b.teamId));
 
   /** Bugs don't persist ordering, so the drop slot (`overId`) is ignored — only
    * the destination column matters. */
@@ -267,6 +280,10 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
           <FilterMenu size="default" categories={filterCategories} value={filters} onChange={setFilters} />
         </div>
       }
+      // Every row here is a bug, so severity is always a real ordering — and on a
+      // list grouped by status column it orders *within* each column, which is how
+      // the criticals sitting in "Open" surface.
+      sort={isList ? <SortMenu value={sort} onChange={setSort} severity /> : undefined}
       filtersEnd={
         <>
           {/* Insights lives in the cycle bar; that bar only exists when the board
@@ -326,7 +343,12 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
           getId={(b) => b.id}
           getColumnKey={(b) => b.status}
           renderCard={(bug, overlay) => (
-            <BugCard bug={bug} labels={labelsFor(bug.teamId)} overlay={overlay} />
+            <BugCard
+              bug={bug}
+              labels={labelsFor(bug.teamId)}
+              cycle={cycleFor(bug.cycleId)}
+              overlay={overlay}
+            />
           )}
           onMove={onMove}
           disabled={!canWrite}
@@ -362,6 +384,7 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
             bugs={bugs}
             columns={columns}
             labelsFor={labelsFor}
+            cycleFor={cycleFor}
             onOpen={(b) => navigate(`/issues/${b.shortId || b.id}`)}
             selection={bulkEnabled ? selection : undefined}
           />
@@ -377,7 +400,6 @@ export function BugsBoardPage({ teamId, teamName, titleIcon, shareTeam }: BugsBo
           selection={selection}
           visibleIds={bugs.map((b) => b.id)}
           columns={columns}
-          assignees={assigneeOptions}
           cycles={cycleOptions}
         />
       )}
@@ -392,12 +414,16 @@ export function BugList({
   bugs,
   columns,
   labelsFor,
+  cycleFor,
   onOpen,
   selection,
 }: {
   bugs: BugDto[];
   columns: { key: string; label: string; color: string }[];
   labelsFor: (teamId: string | undefined) => TaskLabelConfig[];
+  /** Row → its cycle (`useCycleLookup`). Optional so the public board, which has
+   *  no `/teams` access, simply renders rows without a cycle chip. */
+  cycleFor?: (cycleId: string | undefined) => CycleDto | undefined;
   onOpen: (bug: BugDto) => void;
   /** When present, each row gets a checkbox and each column a select-all. */
   selection?: IssueSelection;
@@ -456,6 +482,12 @@ export function BugList({
                       title={BUG_SEVERITY_LABEL[bug.severity]}
                     />
                     <span className="min-w-0 flex-1 truncate text-sm">{bug.title}</span>
+                    {/* Hidden on mobile, like the labels beside it — a row has
+                        room for the title and the assignee first. */}
+                    <IssueCycleChip
+                      cycle={cycleFor?.(bug.cycleId)}
+                      className="hidden shrink-0 sm:flex"
+                    />
                     <LabelChips
                       keys={bug.labelKeys}
                       labels={labelsFor(bug.teamId)}
@@ -467,9 +499,11 @@ export function BugList({
                         {bug.shortId}
                       </span>
                     )}
-                    <Badge variant="muted" className="max-w-[35%] shrink-0 truncate">
-                      {bug.assigneeName || t('bugs.unassigned')}
-                    </Badge>
+                    <AssigneeBadge
+                      assignees={bug.assignees}
+                      unassignedLabel={t('bugs.unassigned')}
+                      className="max-w-[35%] shrink-0"
+                    />
                   </button>
                 </div>
               ))}

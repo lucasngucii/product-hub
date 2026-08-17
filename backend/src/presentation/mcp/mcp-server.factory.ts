@@ -9,25 +9,87 @@ import {
   RoadmapItemStatus,
 } from '@application/roadmaps/domain/enums/roadmap.enums';
 import {
+  McpAddCommentDto,
   McpCreateBacklogItemDto,
   McpCreateDocDto,
   McpCreateIssueDto,
+  McpDeleteCommentDto,
+  McpDeleteIssueDto,
+  McpGetIssueDto,
+  McpLinkIssuesDto,
+  McpListBacklogItemsDto,
+  McpListCommentsDto,
+  McpListLinksDto,
   McpSearchIssuesDto,
+  McpSetStatusDto,
+  McpUnlinkIssuesDto,
+  McpUpdateCommentDto,
+  McpUpdateDocDto,
+  McpUpdateIssueDto,
+  McpUploadFileDto,
+  McpCreateUploadUrlDto,
 } from '@application/mcp/dtos/mcp.dtos';
 import {
+  McpBugStatsDto,
+  McpCycleBurndownDto,
+  McpListCyclesDto,
+  McpTeamVelocityDto,
+} from '@application/mcp/dtos/mcp-analytics.dtos';
+import {
+  McpBacklogItemBriefDto,
   McpBacklogItemResponseDto,
+  McpCommentDto,
+  McpCommentResultDto,
   McpContextResponseDto,
+  McpDeletedCommentResponseDto,
+  McpDeletedIssueResponseDto,
   McpDocResponseDto,
+  McpIssueDetailResponseDto,
+  McpIssueLinkDto,
   McpIssueResponseDto,
+  McpLinkResultDto,
+  McpUnlinkResultDto,
+  McpUpdatedDocResponseDto,
+  McpUploadedFileDto,
+  McpUploadUrlDto,
 } from '@application/mcp/dtos/mcp.response.dto';
+import {
+  McpBugStatsResponseDto,
+  McpCycleSummaryDto,
+  McpVelocityResponseDto,
+} from '@application/mcp/dtos/mcp-analytics.response.dto';
+import {
+  CycleBurndownGroupDto,
+  CycleBurndownResponseDto,
+} from '@application/cycles/dtos/cycle.dtos';
 import {
   GetMcpContextUseCase,
   McpActor,
+  McpAddCommentUseCase,
   McpCreateBacklogItemUseCase,
   McpCreateDocUseCase,
   McpCreateIssueUseCase,
+  McpDeleteCommentUseCase,
+  McpDeleteIssueUseCase,
+  McpGetBugStatsUseCase,
+  McpGetCycleBurndownUseCase,
+  McpGetIssueUseCase,
+  McpGetTeamVelocityUseCase,
+  McpLinkIssuesUseCase,
+  McpListBacklogItemsUseCase,
+  McpListCommentsUseCase,
+  McpListCyclesUseCase,
+  McpListLinksUseCase,
   McpSearchIssuesUseCase,
+  McpSetStatusUseCase,
+  McpUnlinkIssuesUseCase,
+  McpUpdateCommentUseCase,
+  McpUpdateDocUseCase,
+  McpUpdateIssueUseCase,
+  McpUploadFileUseCase,
+  McpCreateUploadUrlUseCase,
 } from '@application/mcp/use-cases';
+import { assertCanDelete, assertCanWrite } from './mcp-scope';
 
 /** Version advertised to the client during the MCP handshake. */
 const SERVER_VERSION = '1.0.0';
@@ -39,6 +101,14 @@ const SERVER_VERSION = '1.0.0';
  */
 export interface McpActorHolder {
   actor: McpActor;
+  /**
+   * This API's own base URL (`https://host/v1/mcp`), read off the request that
+   * opened the session rather than from config: `APP_BASE_URL` is the *web app*,
+   * and an upload URL built from it would point at the frontend. Taking it from
+   * the request also means it is right behind whatever proxy is in front,
+   * without a second env var to keep in sync.
+   */
+  apiUrl: string;
 }
 
 /** An MCP tool reply. Text only — these tools answer in prose, not structures. */
@@ -52,6 +122,22 @@ const failure = (body: string): ToolResult => ({
   isError: true,
   content: [{ type: 'text', text: body }],
 });
+
+/** Runs a write call only if the key's scope permits it, so the gate reads as a
+ *  single wrap at each write tool rather than a repeated branch. */
+function gated<T>(actor: McpActor, call: () => Promise<Result<T>>): Promise<Result<T>> {
+  const gate = assertCanWrite(actor);
+  if (gate.isFailure) return Promise.resolve(Result.fail<T>(gate.error as string));
+  return call();
+}
+
+/** As {@link gated}, but for a destructive tool — a delete needs the delete scope,
+ *  a strictly higher bar than write. */
+function gatedDelete<T>(actor: McpActor, call: () => Promise<Result<T>>): Promise<Result<T>> {
+  const gate = assertCanDelete(actor);
+  if (gate.isFailure) return Promise.resolve(Result.fail<T>(gate.error as string));
+  return call();
+}
 
 /** The error-handling wrapper each `register*` is handed. */
 type Run = <T>(
@@ -77,9 +163,28 @@ export class McpServerFactory {
   constructor(
     private readonly getContext: GetMcpContextUseCase,
     private readonly createIssue: McpCreateIssueUseCase,
+    private readonly getIssue: McpGetIssueUseCase,
+    private readonly updateIssue: McpUpdateIssueUseCase,
+    private readonly setStatus: McpSetStatusUseCase,
+    private readonly deleteIssue: McpDeleteIssueUseCase,
+    private readonly listComments: McpListCommentsUseCase,
+    private readonly addComment: McpAddCommentUseCase,
+    private readonly updateComment: McpUpdateCommentUseCase,
+    private readonly deleteComment: McpDeleteCommentUseCase,
     private readonly createBacklogItem: McpCreateBacklogItemUseCase,
     private readonly createDoc: McpCreateDocUseCase,
+    private readonly updateDoc: McpUpdateDocUseCase,
     private readonly searchIssues: McpSearchIssuesUseCase,
+    private readonly listBacklogItems: McpListBacklogItemsUseCase,
+    private readonly linkIssues: McpLinkIssuesUseCase,
+    private readonly listLinks: McpListLinksUseCase,
+    private readonly unlinkIssues: McpUnlinkIssuesUseCase,
+    private readonly listCycles: McpListCyclesUseCase,
+    private readonly cycleBurndown: McpGetCycleBurndownUseCase,
+    private readonly velocity: McpGetTeamVelocityUseCase,
+    private readonly bugStats: McpGetBugStatsUseCase,
+    private readonly uploadFile: McpUploadFileUseCase,
+    private readonly createUploadUrl: McpCreateUploadUrlUseCase,
     config: ConfigService,
   ) {
     this.appUrl = (config.get<string>('APP_BASE_URL') ?? 'http://localhost:3001').replace(/\/$/, '');
@@ -109,10 +214,29 @@ export class McpServerFactory {
     };
 
     this.registerListWorkspace(server, run);
+    this.registerCreateUploadUrl(server, run, holder.apiUrl);
+    this.registerUploadFile(server, run);
     this.registerSearchIssues(server, run);
+    this.registerGetIssue(server, run);
     this.registerCreateIssue(server, run);
+    this.registerUpdateIssue(server, run);
+    this.registerSetStatus(server, run);
+    this.registerDeleteIssue(server, run);
+    this.registerListComments(server, run);
+    this.registerAddComment(server, run);
+    this.registerUpdateComment(server, run);
+    this.registerDeleteComment(server, run);
     this.registerCreateBacklogItem(server, run);
+    this.registerListBacklogItems(server, run);
     this.registerCreateDoc(server, run);
+    this.registerUpdateDoc(server, run);
+    this.registerLinkIssues(server, run);
+    this.registerListLinks(server, run);
+    this.registerUnlinkIssues(server, run);
+    this.registerListCycles(server, run);
+    this.registerCycleBurndown(server, run);
+    this.registerVelocity(server, run);
+    this.registerBugStats(server, run);
 
     return server;
   }
@@ -139,6 +263,97 @@ export class McpServerFactory {
     );
   }
 
+  /**
+   * The one tool that moves bytes. MCP itself carries no files, so the payload is
+   * base64 — and the reply is a URL, not a record: attaching it is `update_issue`
+   * (bug attachments) or `add_comment` (images), the same two steps the web app
+   * takes. Saying so in the description matters, because an assistant that
+   * uploads and stops has produced a file nobody will ever find.
+   */
+  private registerUploadFile(server: McpServer, run: Run): void {
+    registerTool<McpUploadFileDto>(
+      server,
+      'upload_file',
+      {
+        title: 'Upload a file to the workspace storage',
+        description:
+          'Store a small file by sending its bytes base64-encoded in `data`. Use `create_upload_url` ' +
+          'instead whenever the file is on disk — this tool carries the whole file through the ' +
+          'conversation, which is slow, costly, and caps out around 7MB. This one is for the case ' +
+          'where you already hold the bytes and there is no shell. Uploading does NOT attach ' +
+          'anything: pass the returned URL to `update_issue` (`attachments`, for a bug) or ' +
+          '`add_comment` (`images`) to make it show up. Accepted: images, video, PDF, Office ' +
+          'documents, csv/txt/md.',
+        inputSchema: {
+          name: z
+            .string()
+            .min(1)
+            .describe('File name WITH its extension (checkout-500.png) — the extension sets the type'),
+          data: z
+            .string()
+            .min(1)
+            .describe('The file bytes, base64-encoded. A `data:<type>;base64,<bytes>` URL also works'),
+          contentType: z
+            .string()
+            .optional()
+            .describe('MIME type — only needed when the name has no usable extension'),
+        },
+      },
+      (dto) =>
+        run<McpUploadedFileDto>(
+          (actor) => gated(actor, () => this.uploadFile.execute({ actor, dto })),
+          (f) =>
+            `Uploaded ${f.name} (${describeSize(f.size)}) → ${f.url}\n\n` +
+            'Not attached to anything yet — pass this to update_issue `attachments` or add_comment ' +
+            '`images`.',
+        ),
+    );
+  }
+
+  /**
+   * The way out of base64. `upload_file` puts the whole file in the JSON-RPC
+   * body, so every byte is read into the assistant's context on the way past —
+   * a real screenshot can cost more context than the conversation it belongs to,
+   * and past ~7MB it does not fit at all. This hands back a URL instead: one
+   * `curl -F` sends the file straight from disk to storage.
+   *
+   * The reply is a command, not a description of one. An assistant asked to
+   * "POST multipart" invents the field name; given the line to run, it runs it.
+   */
+  private registerCreateUploadUrl(server: McpServer, run: Run, apiUrl: string): void {
+    registerTool<McpCreateUploadUrlDto>(
+      server,
+      'create_upload_url',
+      {
+        title: 'Get a URL to upload a file to',
+        description:
+          'Prefer this over `upload_file` for anything real — a screenshot, a recording, a log. It ' +
+          'returns a short-lived URL you upload to with one shell command, so the file goes from ' +
+          'disk to storage without passing through the conversation (which is what makes ' +
+          '`upload_file` lossy for big or high-resolution files). Run the returned `curl` line; it ' +
+          'replies with JSON whose `url` is the stored file. Uploading does NOT attach anything: ' +
+          'pass that `url` to `update_issue` (`attachments`, for a bug) or `add_comment` (`images`).',
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          name: z
+            .string()
+            .optional()
+            .describe('The file you are about to send — used to write the example command'),
+        },
+      },
+      (dto) =>
+        run<McpUploadUrlDto>(
+          (actor) =>
+            gated(actor, () => this.createUploadUrl.execute({ actor, dto, baseUrl: apiUrl })),
+          (t) =>
+            `Upload URL ready (valid ${Math.round(t.expiresInSeconds / 60)} minutes, up to ` +
+            `${describeSize(t.maxBytes)}). Run:\n\n  ${t.curl}\n\n` +
+            'Replace the path with the real file. The reply is JSON — take its `url` and attach it ' +
+            'with update_issue `attachments` or add_comment `images`. Nothing is attached until you do.',
+        ),
+    );
+  }
+
   private registerSearchIssues(server: McpServer, run: Run): void {
     registerTool<McpSearchIssuesDto>(
       server,
@@ -147,11 +362,20 @@ export class McpServerFactory {
         title: 'Search issues',
         description:
           'Find existing tasks and bugs by title or reference. Use it before creating to avoid filing ' +
-          'a duplicate, or to quote an issue back to the user.',
+          'a duplicate, or to quote an issue back to the user. Pass `parent` to list an issue’s ' +
+          'subtasks, or `backlog` to list every ticket filed under a roadmap backlog item.',
         inputSchema: {
           search: z.string().optional().describe('Free text matched against title and reference'),
           kind: z.nativeEnum(IssueKind).optional(),
           team: z.string().optional().describe('Team name or id'),
+          parent: z
+            .string()
+            .optional()
+            .describe('Parent issue ref (e.g. ENG-14) or id — returns that issue’s subtasks'),
+          backlog: z
+            .string()
+            .optional()
+            .describe('Backlog item ref (e.g. RM-6) or id — returns the tickets linked to it'),
           limit: z.number().int().min(1).max(50).optional().describe('Default 20'),
         },
         annotations: { readOnlyHint: true },
@@ -176,7 +400,8 @@ export class McpServerFactory {
         description:
           'File a task or bug on a team board in Product OS. Team, status and assignee accept plain ' +
           'names ("QC", "In progress", "Aaron") — an unknown one comes back with the valid choices ' +
-          'instead of guessing. Omit `team` to use the workspace default for the kind.',
+          'instead of guessing. Omit `team` to use the workspace default for the kind. Pass `parent` ' +
+          'to create this as a subtask under an existing issue.',
         inputSchema: {
           kind: z.nativeEnum(IssueKind).describe('task = work to do, bug = a defect'),
           title: z.string().min(1),
@@ -186,7 +411,10 @@ export class McpServerFactory {
             .string()
             .optional()
             .describe("Status key or column label; defaults to the board's first column"),
-          assignee: z.string().optional().describe('Person name or email'),
+          assignee: z
+            .string()
+            .optional()
+            .describe('Person name or email; several, comma-separated, to share the issue'),
           severity: z.nativeEnum(BugSeverity).optional().describe('Bugs only'),
           estimate: z.number().min(0).optional().describe('Story points — tasks only'),
           startDate: z.string().optional().describe('YYYY-MM-DD'),
@@ -195,14 +423,265 @@ export class McpServerFactory {
             .string()
             .optional()
             .describe(
-              'Roadmap backlog item ref (RM-6HCUHKX) or id to file this under, as delivery work for it',
+              'Roadmap backlog item ref (e.g. RM-6) or id to file this under, as delivery work for it',
+            ),
+          parent: z
+            .string()
+            .optional()
+            .describe('Parent issue ref (e.g. ENG-14) or id — creates this as a subtask under it'),
+        },
+      },
+      (dto) =>
+        run<McpIssueResponseDto>(
+          (actor) => gated(actor, () => this.createIssue.execute({ actor, dto })),
+          (issue) => `Created ${issue.shortId} — ${issue.title}\n\n${this.describeIssue(issue)}`,
+        ),
+    );
+  }
+
+  private registerGetIssue(server: McpServer, run: Run): void {
+    registerTool<McpGetIssueDto>(
+      server,
+      'get_issue',
+      {
+        title: 'Read one issue in full',
+        description:
+          'Read a single task or bug by its reference — each team mints its own prefix, so refs look ' +
+          'like "ENG-14" or "QC-8" (list_workspace shows each team) — or by id. Returns its status, team, ' +
+          'assignees, description, labels, its subtasks and its most recent comments (the total is ' +
+          'commentCount; use list_comments for the whole thread). Call this before update_issue or ' +
+          'delete_issue so you edit from the current state.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<McpIssueDetailResponseDto>(
+          (actor) => this.getIssue.execute({ actor, dto }),
+          (issue) => this.describeIssueDetail(issue),
+        ),
+    );
+  }
+
+  private registerUpdateIssue(server: McpServer, run: Run): void {
+    registerTool<McpUpdateIssueDto>(
+      server,
+      'update_issue',
+      {
+        title: 'Update a task or bug',
+        description:
+          'Patch an existing task or bug — only the fields you pass change. `assignee` and `labels` ' +
+          'REPLACE the whole set, they do not add to it: to keep the current people/labels, include ' +
+          'them; pass "" to `assignee` (or [] to `labels`) to clear them. To MOVE an issue between ' +
+          'status columns use set_issue_status, not this tool — there is no `status` here and no way ' +
+          'to change the team. `parent` nests the issue as a subtask ("" detaches); `backlogItem` ' +
+          'links it to a roadmap item ("" unlinks). Names and refs resolve like create_issue.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+          title: z.string().optional(),
+          description: z.string().optional().describe('Plain text or HTML — replaces the description'),
+          assignee: z
+            .string()
+            .optional()
+            .describe('Names/emails, comma-separated — REPLACES the whole set; "" unassigns everyone'),
+          cycleId: z.string().optional().describe("Team cycle to commit to; '' leaves the cycle"),
+          estimate: z.number().min(0).optional().describe('Story points — tasks only'),
+          severity: z.nativeEnum(BugSeverity).optional().describe('Bugs only'),
+          startDate: z.string().optional().describe("YYYY-MM-DD; '' clears"),
+          endDate: z.string().optional().describe("YYYY-MM-DD; '' clears"),
+          parent: z.string().optional().describe("Parent issue ref/id to nest under; '' detaches"),
+          backlogItem: z.string().optional().describe("Backlog item ref/id to link; '' unlinks"),
+          labels: z
+            .array(z.string())
+            .optional()
+            .describe('Team label keys/names — REPLACES the whole set ([] clears)'),
+          attachments: z
+            .array(
+              z.object({
+                url: z.string().describe('Public URL returned by upload_file'),
+                name: z.string().describe('Display name on the issue'),
+                contentType: z.string().optional(),
+                size: z.number().min(0).optional(),
+              }),
+            )
+            .optional()
+            .describe(
+              'Files on a bug — REPLACES the whole set ([] clears). Call upload_file first, and ' +
+                'get_issue to read the existing attachments so you can send them back alongside ' +
+                'the new one instead of dropping them.',
             ),
         },
       },
       (dto) =>
         run<McpIssueResponseDto>(
-          (actor) => this.createIssue.execute({ actor, dto }),
-          (issue) => `Created ${issue.shortId} — ${issue.title}\n\n${this.describeIssue(issue)}`,
+          (actor) => gated(actor, () => this.updateIssue.execute({ actor, dto })),
+          (issue) => `Updated ${issue.shortId} — ${issue.title}\n\n${this.describeIssue(issue)}`,
+        ),
+    );
+  }
+
+  private registerSetStatus(server: McpServer, run: Run): void {
+    registerTool<McpSetStatusDto>(
+      server,
+      'set_issue_status',
+      {
+        title: 'Move an issue to another status',
+        description:
+          'Move a task or bug into a different status column on its board — the Kanban drag. `status` ' +
+          'accepts a column key or its label ("In progress", "Done") and is validated against the ' +
+          "issue's own team board; an unknown one comes back with the valid columns. This is the only " +
+          'way to change status — update_issue does not touch it.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+          status: z.string().describe("Status key or column label on the issue's board"),
+        },
+      },
+      (dto) =>
+        run<McpIssueResponseDto>(
+          (actor) => gated(actor, () => this.setStatus.execute({ actor, dto })),
+          (issue) => `Moved ${issue.shortId} → ${issue.status}\n\n${this.describeIssue(issue)}`,
+        ),
+    );
+  }
+
+  private registerDeleteIssue(server: McpServer, run: Run): void {
+    registerTool<McpDeleteIssueDto>(
+      server,
+      'delete_issue',
+      {
+        title: 'Delete a task or bug',
+        description:
+          'Permanently delete a task or bug by ref or id. This cannot be undone. It is REFUSED when ' +
+          'the issue still has subtasks — the reply lists them so you can move or delete them first. ' +
+          'Deleting a bug needs an admin/product key owner. Requires a key with delete access.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+        },
+        annotations: { destructiveHint: true },
+      },
+      (dto) =>
+        run<McpDeletedIssueResponseDto>(
+          (actor) => gatedDelete(actor, () => this.deleteIssue.execute({ actor, dto })),
+          (issue) => `Deleted ${issue.shortId || issue.id} — ${issue.title}`,
+        ),
+    );
+  }
+
+  private registerListComments(server: McpServer, run: Run): void {
+    registerTool<McpListCommentsDto>(
+      server,
+      'list_comments',
+      {
+        title: 'List an issue’s comments',
+        description:
+          'Read the full comment thread on a task or bug by its ref ("ENG-14") or id. Each line shows ' +
+          'the comment id (pass it to update_comment/delete_comment), the author, when it was posted ' +
+          'and an excerpt; replies are shown indented under the comment they answer.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<McpCommentDto[]>(
+          (actor) => this.listComments.execute({ actor, dto }),
+          (comments) =>
+            comments.length
+              ? `${comments.length} comment(s):\n\n${this.describeComments(comments)}`
+              : 'No comments yet.',
+        ),
+    );
+  }
+
+  private registerAddComment(server: McpServer, run: Run): void {
+    registerTool<McpAddCommentDto>(
+      server,
+      'add_comment',
+      {
+        title: 'Comment on an issue',
+        description:
+          'Post a comment on a task or bug. Set `replyTo` to a comment id (from list_comments or ' +
+          'get_issue) to reply — threads are one level deep, so a reply to a reply attaches to its ' +
+          'root. `mentions` takes people by name or email ("Aaron", "jane@acme.co"); they are ' +
+          'resolved to users and pinged, so write the @name in the body AND list them here.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+          body: z
+            .string()
+            .min(1)
+            .describe('Comment text — Markdown, HTML or plain text. ```code``` and **bold** render.'),
+          replyTo: z.string().optional().describe('Comment id to reply to'),
+          mentions: z
+            .array(z.string())
+            .optional()
+            .describe('People to notify, by name or email'),
+          images: z
+            .array(z.string())
+            .optional()
+            .describe('Image URLs from upload_file, shown under the comment'),
+        },
+      },
+      (dto) =>
+        run<McpCommentResultDto>(
+          (actor) => gated(actor, () => this.addComment.execute({ actor, dto })),
+          (c) => `Commented on ${c.issueShortId}\n\n${this.url(c.link)}`,
+        ),
+    );
+  }
+
+  private registerUpdateComment(server: McpServer, run: Run): void {
+    registerTool<McpUpdateCommentDto>(
+      server,
+      'update_comment',
+      {
+        title: 'Edit a comment',
+        description:
+          'Edit a comment by its id (from list_comments or get_issue). Only the comment’s author, or ' +
+          'an admin/product key owner, may edit it — otherwise it is refused. `mentions` REPLACES the ' +
+          'set (names/emails); pass [] to clear them, or omit it to leave them unchanged.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+          comment: z.string().describe('Comment id to edit'),
+          body: z.string().optional().describe('New body — Markdown, HTML or plain text'),
+          mentions: z
+            .array(z.string())
+            .optional()
+            .describe('Names/emails — REPLACES the mention set ([] clears)'),
+          images: z
+            .array(z.string())
+            .optional()
+            .describe('Image URLs — REPLACES the comment’s images ([] clears)'),
+        },
+      },
+      (dto) =>
+        run<McpCommentResultDto>(
+          (actor) => gated(actor, () => this.updateComment.execute({ actor, dto })),
+          (c) => `Updated comment on ${c.issueShortId}\n\n${this.url(c.link)}`,
+        ),
+    );
+  }
+
+  private registerDeleteComment(server: McpServer, run: Run): void {
+    registerTool<McpDeleteCommentDto>(
+      server,
+      'delete_comment',
+      {
+        title: 'Delete a comment',
+        description:
+          'Permanently delete a comment by its id (from list_comments or get_issue). This cannot be ' +
+          'undone. Only the comment’s author, or an admin/product key owner, may delete it. Requires ' +
+          'a key with delete access.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+          comment: z.string().describe('Comment id to delete'),
+        },
+        annotations: { destructiveHint: true },
+      },
+      (dto) =>
+        run<McpDeletedCommentResponseDto>(
+          (actor) => gatedDelete(actor, () => this.deleteComment.execute({ actor, dto })),
+          (c) => `Deleted comment on ${c.issueShortId}`,
         ),
     );
   }
@@ -229,17 +708,44 @@ export class McpServerFactory {
           confidence: z.number().min(1).max(5).optional(),
           effort: z.number().min(1).max(5).optional(),
           startDate: z.string().optional().describe('YYYY-MM-DD'),
+          endDate: z.string().optional().describe('YYYY-MM-DD'),
         },
       },
       (dto) =>
         run<McpBacklogItemResponseDto>(
-          (actor) => this.createBacklogItem.execute({ actor, dto }),
+          (actor) => gated(actor, () => this.createBacklogItem.execute({ actor, dto })),
           (item) =>
             [
               `Added ${item.shortId} "${item.title}" to ${item.roadmapTitle} → ${item.phase}`,
               `RICE ${item.riceScore} · status ${item.status}`,
               this.url(item.link),
             ].join('\n'),
+        ),
+    );
+  }
+
+  private registerListBacklogItems(server: McpServer, run: Run): void {
+    registerTool<McpListBacklogItemsDto>(
+      server,
+      'list_backlog_items',
+      {
+        title: 'List roadmap backlog items',
+        description:
+          'Browse the roadmap backlog — each item’s ref (RM-…), title, column, status and RICE score. ' +
+          'Use it to pick an item to file a ticket under (create_issue `backlogItemId`) or to answer ' +
+          '"what’s on the roadmap". Pass `roadmap` to one board, or omit it to list them all.',
+        inputSchema: {
+          roadmap: z.string().optional().describe('Roadmap title or id — omit to list every roadmap'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<McpBacklogItemBriefDto[]>(
+          (actor) => this.listBacklogItems.execute({ actor, dto }),
+          (items) =>
+            items.length
+              ? `${items.length} backlog item(s):\n\n${items.map((i) => this.describeBacklogItem(i)).join('\n\n')}`
+              : 'No backlog items.',
         ),
     );
   }
@@ -275,12 +781,260 @@ export class McpServerFactory {
       },
       (dto) =>
         run<McpDocResponseDto>(
-          (actor) => this.createDoc.execute({ actor, dto }),
+          (actor) => gated(actor, () => this.createDoc.execute({ actor, dto })),
           (doc) =>
             [
               `Created doc "${doc.title}"${doc.tags.length ? ` · ${doc.tags.join(', ')}` : ''}`,
               this.url(doc.link),
             ].join('\n'),
+        ),
+    );
+  }
+
+  private registerUpdateDoc(server: McpServer, run: Run): void {
+    registerTool<McpUpdateDocDto>(
+      server,
+      'update_doc',
+      {
+        title: 'Edit an existing doc',
+        description:
+          'Edit a doc that already exists (create_doc makes a new one). Address it by ref (DOC-…) ' +
+          'or id. `title` renames it and `tags` REPLACE its whole tag list. `content` REPLACES the ' +
+          'ENTIRE body of one page — whatever you send becomes the page; to keep existing text, ' +
+          'images or Mermaid diagrams, read them first (the doc in the app) and include them, or ' +
+          'they are gone. The page edited is `page` (a page id) or, when omitted, the doc’s first ' +
+          'page. To ADD a page rather than overwrite one, use `appendPage` instead of `content`. ' +
+          'Body accepts HTML, Markdown or a ```mermaid fence, converted like create_doc.',
+        inputSchema: {
+          doc: z.string().describe('Doc ref (DOC-…) or id'),
+          title: z.string().max(160).optional().describe('Rename the doc'),
+          tags: z.array(z.string()).optional().describe('REPLACES the whole tag list'),
+          page: z
+            .string()
+            .optional()
+            .describe('Id of the page to edit; omit to edit the doc’s first page'),
+          content: z
+            .string()
+            .optional()
+            .describe(
+              'New page body — REPLACES the whole body. HTML is stored as-is; Markdown and a ' +
+                '```mermaid fence are converted. Include any existing content you want to keep.',
+            ),
+          appendPage: z
+            .object({
+              title: z.string().min(1).max(300).describe('Title for the new page'),
+              content: z.string().optional().describe('Body — HTML, Markdown or a ```mermaid fence'),
+            })
+            .optional()
+            .describe('Add a NEW page to the doc instead of editing one'),
+        },
+      },
+      (dto) =>
+        run<McpUpdatedDocResponseDto>(
+          (actor) => gated(actor, () => this.updateDoc.execute({ actor, dto })),
+          (doc) =>
+            [
+              `Updated doc "${doc.title}"${doc.changed ? ` — ${doc.changed}` : ''}` +
+                `${doc.tags.length ? ` · ${doc.tags.join(', ')}` : ''}`,
+              this.url(doc.link),
+            ].join('\n'),
+        ),
+    );
+  }
+
+  private registerLinkIssues(server: McpServer, run: Run): void {
+    registerTool<McpLinkIssuesDto>(
+      server,
+      'link_issues',
+      {
+        title: 'Link two issues',
+        description:
+          'Create a typed relation between two issues by their refs — "ENG-14 blocks ENG-19", ' +
+          '"QC-8 duplicate-of QC-3" (refs carry the owning team’s prefix, so they differ per team). ' +
+          '`type` accepts blocks, blocked-by, related-to or duplicate-of; the relation reads from ' +
+          '`from` to `to`. An unknown type comes back with the valid choices. These are peer ' +
+          'relations only — to nest one issue under another use update_issue with `parent` (an ' +
+          'issue has exactly one parent). Use list_links to see or unlink existing relations.',
+        inputSchema: {
+          from: z.string().describe('Source issue ref (e.g. ENG-14) or id'),
+          to: z.string().describe('Target issue ref (e.g. ENG-19) or id'),
+          type: z.string().describe('blocks · blocked-by · related-to · duplicate-of'),
+        },
+      },
+      (dto) =>
+        run<McpLinkResultDto>(
+          (actor) => gated(actor, () => this.linkIssues.execute({ actor, dto })),
+          (l) => `Linked ${l.fromShortId} ${l.relationType} ${l.toShortId}`,
+        ),
+    );
+  }
+
+  private registerListLinks(server: McpServer, run: Run): void {
+    registerTool<McpListLinksDto>(
+      server,
+      'list_links',
+      {
+        title: 'List an issue’s relations',
+        description:
+          'Read the relations on a task or bug by its ref ("ENG-14") or id — each line shows the ' +
+          'relation, the linked issue’s ref, title and status, and the link id (pass it to ' +
+          'unlink_issues to remove the relation). Relations read from the asked-about issue’s side.',
+        inputSchema: {
+          issue: z.string().describe('Issue ref — the owning team’s prefix and number, e.g. ENG-14 or QC-8 — or id'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<McpIssueLinkDto[]>(
+          (actor) => this.listLinks.execute({ actor, dto }),
+          (links) =>
+            links.length
+              ? `${links.length} relation(s):\n\n${links.map((l) => this.describeLink(l)).join('\n')}`
+              : 'No relations.',
+        ),
+    );
+  }
+
+  private registerUnlinkIssues(server: McpServer, run: Run): void {
+    registerTool<McpUnlinkIssuesDto>(
+      server,
+      'unlink_issues',
+      {
+        title: 'Remove a relation between issues',
+        description:
+          'Remove one relation by its link id (from list_links). This detaches the two issues; it ' +
+          'does not delete either issue, so a write key is enough — no delete access needed.',
+        inputSchema: {
+          link: z.string().describe('Link id (from list_links)'),
+        },
+      },
+      (dto) =>
+        run<McpUnlinkResultDto>(
+          (actor) => gated(actor, () => this.unlinkIssues.execute({ actor, dto })),
+          () => 'Removed link',
+        ),
+    );
+  }
+
+  private registerListCycles(server: McpServer, run: Run): void {
+    registerTool<McpListCyclesDto>(
+      server,
+      'list_cycles',
+      {
+        title: 'List a team’s sprints',
+        description:
+          'The sprint (cycle) history of one team, newest window first — number, name, dates, ' +
+          'status (upcoming/active/completed), the sprint goal, and how much was planned vs ' +
+          'finished. Call this to find a sprint before get_cycle_burndown, or to answer "what ' +
+          'is the team working on this sprint". A team with cycles switched off says so rather ' +
+          'than returning an empty list.',
+        inputSchema: {
+          team: z.string().describe('Team name or id — required'),
+          limit: z.number().int().min(1).max(50).optional().describe('Default 10'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<McpCycleSummaryDto[]>(
+          (actor) => this.listCycles.execute({ actor, dto }),
+          (cycles) =>
+            cycles.length
+              ? `${cycles.length} sprint(s):\n\n${cycles.map((c) => this.describeCycle(c)).join('\n\n')}`
+              : 'No sprints yet.',
+        ),
+    );
+  }
+
+  private registerCycleBurndown(server: McpServer, run: Run): void {
+    registerTool<McpCycleBurndownDto>(
+      server,
+      'get_cycle_burndown',
+      {
+        title: 'Read a sprint’s burn-up',
+        description:
+          'How one sprint actually went, day by day: scope vs started vs completed, plus the ' +
+          'split by assignee, label and project. `cycle` takes a number ("3"), a name, an id, ' +
+          'or one of "current" / "next" / "last" — "last" is the most recently finished sprint, ' +
+          'which is what a retro or sprint review usually wants. Reported in the unit the team ' +
+          'estimates in (story points, or issue count when the team does not point).',
+        inputSchema: {
+          team: z.string().describe('Team name or id'),
+          cycle: z.string().describe('Sprint number, name, id, or current / next / last'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<CycleBurndownResponseDto>(
+          (actor) => this.cycleBurndown.execute({ actor, dto }),
+          (b) => this.describeBurndown(b),
+        ),
+    );
+  }
+
+  private registerVelocity(server: McpServer, run: Run): void {
+    registerTool<McpTeamVelocityDto>(
+      server,
+      'get_team_velocity',
+      {
+        title: 'Read a team’s velocity',
+        description:
+          'How much a team actually finishes per sprint, across its recent completed sprints — ' +
+          'per-sprint committed vs delivered, plus the average and the range. Use it to answer ' +
+          '"is the team slower than usual" or to size the next sprint. Only completed sprints ' +
+          'count (a running one is not done yet). Reported in story points when the team points ' +
+          'its work, otherwise in issue count.',
+        inputSchema: {
+          team: z.string().describe('Team name or id'),
+          cycles: z
+            .number()
+            .int()
+            .min(1)
+            .max(24)
+            .optional()
+            .describe('How many recent completed sprints; default 6'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<McpVelocityResponseDto>(
+          (actor) => this.velocity.execute({ actor, dto }),
+          (v) => this.describeVelocity(v),
+        ),
+    );
+  }
+
+  private registerBugStats(server: McpServer, run: Run): void {
+    registerTool<McpBugStatsDto>(
+      server,
+      'get_bug_stats',
+      {
+        title: 'Bug distribution and flow',
+        description:
+          'Counts of bugs, grouped however you ask. `groupBy` is a SNAPSHOT — how the bugs ' +
+          'matching your filter split across status, severity, assignee, team, label or project ' +
+          '(default: status + severity). `trend` is FLOW — how many were opened vs closed each ' +
+          'week or month, and whether the backlog is growing. Ask only for the dimensions you ' +
+          'need; each one adds to the reply. `since`/`until` filter by when a bug was OPENED. ' +
+          'Note: a bug reopened later loses its close date, so a past period’s "closed" count ' +
+          'can change — say so if you quote these numbers in a report. Also: when `since`/`until` ' +
+          'are set, `trend`\'s "closed" counts still only cover bugs that were OPENED inside that ' +
+          'window, so a bug opened earlier and closed inside the window is missing from it.',
+        inputSchema: {
+          team: z.string().optional().describe('Bug team name or id; omit for the whole workspace'),
+          since: z.string().optional().describe('YYYY-MM-DD — bugs opened on or after'),
+          until: z.string().optional().describe('YYYY-MM-DD — bugs opened on or before'),
+          groupBy: z
+            .array(z.enum(['status', 'severity', 'assignee', 'team', 'label', 'project']))
+            .optional()
+            .describe('Snapshot dimensions; default ["status","severity"]'),
+          trend: z.enum(['week', 'month']).optional().describe('Add opened/closed per bucket'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      (dto) =>
+        run<McpBugStatsResponseDto>(
+          (actor) => this.bugStats.execute({ actor, dto }),
+          (s) => this.describeBugStats(s),
         ),
     );
   }
@@ -291,14 +1045,211 @@ export class McpServerFactory {
     return `${this.appUrl}${path}`;
   }
 
+  private describeIssueDetail(i: McpIssueDetailResponseDto): string {
+    const head = [
+      `${i.shortId} · ${i.title}`,
+      `  ${i.kind} · ${i.teamName || 'no team'} · ${i.status}` +
+        (i.assigneeNames.length ? ` · ${i.assigneeNames.join(', ')}` : '') +
+        (i.severity ? ` · ${i.severity}` : '') +
+        (i.estimate ? ` · ${i.estimate}pt` : ''),
+      i.labelKeys.length ? `  labels: ${i.labelKeys.join(', ')}` : '',
+      // Sits with the other identity lines, above the body: whether this issue
+      // is part of something bigger changes how you read the description, so it
+      // can't wait until after it.
+      i.parentShortId ? `  parent: ${i.parentShortId} · ${i.parentTitle}` : '',
+      i.description ? `\n${i.description}` : '',
+    ].filter(Boolean);
+    const subtasks = i.subtaskCount
+      ? [
+          '',
+          i.subtasks.length < i.subtaskCount
+            ? `Subtasks (showing ${i.subtasks.length} of ${i.subtaskCount}):`
+            : `Subtasks (${i.subtaskCount}):`,
+          ...i.subtasks.map((s) => `  ${s.shortId} · ${s.title} · ${s.status}`),
+        ]
+      : ['', 'No subtasks.'];
+    // Listed with their URLs, because `update_issue.attachments` replaces the set
+    // — this is the list a caller has to send back to keep what is already there.
+    const attachments = i.attachments.length
+      ? [
+          '',
+          `Attachments (${i.attachments.length}):`,
+          ...i.attachments.map(
+            (a) => `  ${a.name}${a.size ? ` · ${describeSize(a.size)}` : ''}\n    ${a.url}`,
+          ),
+        ]
+      : [];
+    const comments = i.commentCount
+      ? [
+          '',
+          i.comments.length < i.commentCount
+            ? `Comments (latest ${i.comments.length} of ${i.commentCount} — list_comments for all):`
+            : `Comments (${i.commentCount}):`,
+          ...this.describeComments(i.comments).split('\n'),
+        ]
+      : ['', 'No comments.'];
+    return [...head, ...subtasks, ...attachments, ...comments, '', `  ${this.url(i.link)}`].join(
+      '\n',
+    );
+  }
+
+  /** A comment thread as text — replies indented one level under their root. */
+  private describeComments(comments: McpCommentDto[]): string {
+    return comments
+      .map((c) => {
+        const indent = c.parentId ? '    ↳ ' : '  ';
+        const when = c.createdAt ? new Date(c.createdAt).toISOString().slice(0, 10) : '';
+        return (
+          `${indent}[${c.id}] ${c.authorName}${when ? ` · ${when}` : ''}` +
+          (c.excerpt ? `\n${indent}  ${c.excerpt}` : '')
+        );
+      })
+      .join('\n');
+  }
+
   private describeIssue(i: McpIssueResponseDto): string {
     return [
       `${i.shortId} · ${i.title}`,
       `  ${i.kind} · ${i.teamName || 'no team'} · ${i.status}` +
-        (i.assigneeName ? ` · ${i.assigneeName}` : '') +
+        (i.assigneeNames.length ? ` · ${i.assigneeNames.join(', ')}` : '') +
         (i.severity ? ` · ${i.severity}` : ''),
       `  ${this.url(i.link)}`,
     ].join('\n');
+  }
+
+  private describeBacklogItem(i: McpBacklogItemBriefDto): string {
+    return [
+      `${i.shortId} · ${i.title}`,
+      `  ${i.roadmapTitle} → ${i.phase} · ${i.status} · RICE ${i.riceScore}`,
+      `  ${this.url(i.link)}`,
+    ].join('\n');
+  }
+
+  private describeCycle(c: McpCycleSummaryDto): string {
+    const label = c.name || `Cycle ${c.number}`;
+    // Điểm chỉ có nghĩa khi team thật sự chấm điểm — scopePoints 0 thì báo theo
+    // số việc, đừng in "0 pts" như thể team không làm gì.
+    const unit =
+      c.scopePoints > 0
+        ? `${c.completedPoints}/${c.scopePoints} pts`
+        : `${c.completedCount}/${c.scopeCount} issues`;
+    return [
+      `${label} · ${c.status}`,
+      `  ${c.startDate} → ${c.endDate} · ${unit}`,
+      c.goal ? `  goal: ${c.goal}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  /** Số lượng mốc cuối của burn-up in ra — cả sprint theo ngày là quá dài cho một
+   *  câu trả lời, và mấy ngày cuối mới là phần nói lên sprint có kịp không. */
+  private static readonly BURNDOWN_TAIL = 10;
+
+  private describeBurndown(b: CycleBurndownResponseDto): string {
+    const points = b.unit === 'points';
+    const n = (count: number, pts: number) => (points ? `${pts} pts` : `${count}`);
+    const tail = b.series.slice(-McpServerFactory.BURNDOWN_TAIL);
+    const head = [
+      `Sprint ${b.number} · ${b.status} · ${b.startDate} → ${b.endDate}`,
+      `  scope ${n(b.scopeCount, b.scopePoints)} · started ${n(b.startedCount, b.startedPoints)} · done ${n(b.completedCount, b.completedPoints)}`,
+      `  measured in ${b.unit}`,
+    ];
+    const series = tail.length
+      ? [
+          '',
+          b.series.length > tail.length
+            ? `Daily (last ${tail.length} of ${b.series.length} days):`
+            : `Daily (${tail.length} days):`,
+          ...tail.map(
+            (d) =>
+              `  ${d.date} · scope ${points ? d.scopePoints : d.scopeCount}` +
+              ` · done ${points ? d.completedPoints : d.completedCount}`,
+          ),
+        ]
+      : ['', 'No daily data.'];
+    const group = (title: string, rows: CycleBurndownGroupDto[]) =>
+      rows.length
+        ? [
+            '',
+            `${title}:`,
+            ...rows.map(
+              (g) =>
+                `  ${g.label || '(none)'} · ${n(g.count, g.points)} planned` +
+                ` · ${n(g.completedCount, g.completedPoints)} done`,
+            ),
+          ]
+        : [];
+    return [
+      ...head,
+      ...series,
+      ...group('By assignee', b.assignees),
+      ...group('By label', b.labels),
+      ...group('By project', b.projects),
+    ].join('\n');
+  }
+
+  private describeVelocity(v: McpVelocityResponseDto): string {
+    const u = v.unit === 'points' ? 'pts' : 'issues';
+    const rows = v.sprints.map((s) => {
+      const label = s.name || `Cycle ${s.number}`;
+      const [did, planned] =
+        v.unit === 'points' ? [s.completedPoints, s.scopePoints] : [s.completedCount, s.scopeCount];
+      return `  ${label} (${s.endDate}) · ${did}/${planned} ${u}`;
+    });
+    const warn = v.unpointedSprints.length
+      ? [
+          '',
+          `Note: sprint(s) ${v.unpointedSprints.join(', ')} carry no story points, so they count ` +
+            `as 0 and pull the average down.`,
+        ]
+      : [];
+    return [
+      `${v.teamName} · average ${v.average} ${u} over ${v.sprintsCounted} sprint(s) · range ${v.min}–${v.max}`,
+      '',
+      ...rows,
+      ...warn,
+    ].join('\n');
+  }
+
+  private describeBugStats(s: McpBugStatsResponseDto): string {
+    const dateFilter = s.since && s.until
+      ? `opened ${s.since} → ${s.until}`
+      : s.since
+        ? `opened on or after ${s.since}`
+        : s.until
+          ? `opened on or before ${s.until}`
+          : '';
+    const scope = [s.teamName || 'whole workspace', dateFilter].filter(Boolean).join(' · ');
+    const out = [`${s.total} bug(s) · ${scope}`];
+
+    for (const d of s.dimensions) {
+      out.push('', `By ${d.dimension}:`);
+      for (const b of d.buckets) out.push(`  ${b.label} · ${b.count}`);
+      if (d.hiddenBuckets) {
+        out.push(`  … and ${d.hiddenBuckets} more (${d.hiddenBugs} bugs)`);
+      }
+      // Không có dòng này, người đọc cộng cột lại rồi thắc mắc sao không ra tổng.
+      if (d.countsAssignments) {
+        out.push(`  (counts assignments — a bug with two ${d.dimension}s appears twice)`);
+      }
+    }
+
+    if (s.trend.length) {
+      const trendRange = s.trendSince && `${s.trendSince} → ${s.trendUntil}`;
+      out.push('', `Opened vs closed per ${s.trendUnit}${trendRange ? ` (${trendRange})` : ''}:`);
+      for (const t of s.trend) {
+        const sign = t.net > 0 ? `+${t.net}` : String(t.net);
+        out.push(`  ${t.bucket} · opened ${t.opened} · closed ${t.closed} · net ${sign}`);
+      }
+      out.push('  (net > 0 means the backlog grew that period)');
+    }
+
+    return out.join('\n');
+  }
+
+  private describeLink(l: McpIssueLinkDto): string {
+    return `  ${l.relationType} · ${l.targetShortId} · ${l.targetTitle} · ${l.targetStatus} · [${l.id}]`;
   }
 
   private describeWorkspace(ctx: McpContextResponseDto): string {
@@ -341,7 +1292,14 @@ interface ToolConfig {
   description: string;
   /** Zod shape — the SDK turns it into the JSON Schema the client is shown. */
   inputSchema?: Record<string, unknown>;
-  annotations?: { readOnlyHint?: boolean };
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+}
+
+/** A byte count as a person reads it — "412 KB", "3.1 MB". */
+function describeSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /** The un-generic shape of `McpServer.registerTool`, see below. */

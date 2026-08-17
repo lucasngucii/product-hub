@@ -58,8 +58,12 @@ const pointsOf = (t: IssueDto) => (t.estimate > 0 ? t.estimate : 0);
  * The column that means "complete". A task board has an explicit `done` column;
  * a bug board doesn't, so its terminal column (last in order, e.g. `closed`)
  * counts as done — otherwise a bug team's progress would be stuck at 0%.
+ *
+ * Exported because "done" must mean one thing across the app: the roadmap's
+ * sprint summary counts finished work with this too, so a board and the sprint
+ * banner above it can't disagree about what shipped.
  */
-function doneKeyOf(columns: TeamStatusConfig[]): string {
+export function doneKeyOf(columns: TeamStatusConfig[]): string {
   if (columns.some((c) => c.key === TaskStatus.DONE)) return TaskStatus.DONE;
   return columns[columns.length - 1]?.key ?? TaskStatus.DONE;
 }
@@ -108,11 +112,18 @@ export function groupByPerson(
 ): PersonWorkload[] {
   const map = new Map<string, { name: string; tasks: IssueDto[] }>();
   for (const t of tasks) {
-    const id = t.assigneeId || UNASSIGNED_ID;
-    const name = t.assigneeId ? t.assigneeName || t.assigneeId : unassignedLabel;
-    const entry = map.get(id) ?? { name, tasks: [] };
-    entry.tasks.push(t);
-    map.set(id, entry);
+    // A shared issue appears in **each** of its assignees' queues, and its points
+    // count in full for every one of them — this view answers "what's on your
+    // plate?", and half a task is not a thing anyone can carry. Column and cycle
+    // totals are per-issue elsewhere, so nothing double-counts against a sprint.
+    const on = t.assignees.length ? t.assignees : [{ id: UNASSIGNED_ID, name: unassignedLabel }];
+    for (const a of on) {
+      const id = a.id || UNASSIGNED_ID;
+      const name = id === UNASSIGNED_ID ? unassignedLabel : a.name || a.id;
+      const entry = map.get(id) ?? { name, tasks: [] };
+      entry.tasks.push(t);
+      map.set(id, entry);
+    }
   }
   return [...map.entries()]
     .map(([id, { name, tasks: ts }]) => buildPerson(id, name, ts, columns))

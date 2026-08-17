@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, type MouseEvent } from 'react';
 import { cn } from '@/lib/utils';
 import { enhanceCodeBlocks } from '@/lib/enhanceCodeBlocks';
+import { foldListIndents, normalizeSpaces } from '@/lib/editorjs';
 import { renderMermaidBlocks } from '@/lib/mermaid';
 // The read-only view paints editor output — code-copy buttons and mermaid
 // diagrams both need these rules, on pages that never mount the editor itself.
 import '@/styles/rich-text-editor.css';
 import { isWebLink, resolveHref, useExternalLink } from './ExternalLink';
-import { useLightbox, type LightboxImage } from './Lightbox';
+import { collectImages, useLightbox } from './Lightbox';
 
 /** Shared prose styling for editor HTML — links, images (click-to-zoom cursor).
  *  `rich-text-content` is the read-view half of the content rules the editor
@@ -44,6 +45,12 @@ export function RichText({ html, className }: RichTextProps) {
   useEffect(() => {
     const root = ref.current;
     if (!root) return;
+    // The same two repairs the editor makes on the way in, so a document pasted
+    // out of a word processor reads the same to someone who can't edit it:
+    // word-joining `&nbsp;` back to spaces (they wrap; a run of them doesn't), and
+    // an indent written as an empty bullet folded onto the line it belongs to.
+    normalizeSpaces(root);
+    foldListIndents(root);
     enhanceCodeBlocks(root);
     // Diagrams are stored as source, so the picture only exists once it's drawn.
     // Fire-and-forget: mermaid loads lazily and a failure prints in its own box.
@@ -66,15 +73,9 @@ export function RichText({ html, className }: RichTextProps) {
       // reader can arrow through them from wherever they clicked.
       const img = el.closest('img');
       if (img && root.contains(img)) {
-        const all = Array.from(root.querySelectorAll('img')).filter(
-          (n) => n.currentSrc || n.getAttribute('src'),
-        );
-        const images: LightboxImage[] = all.map((n) => ({
-          src: n.currentSrc || n.src,
-          alt: n.getAttribute('alt') || undefined,
-        }));
+        const { images, indexOf } = collectImages(root);
         e.preventDefault();
-        lightbox.open(images, Math.max(0, all.indexOf(img as HTMLImageElement)));
+        lightbox.open(images, indexOf(img as HTMLImageElement));
         return;
       }
 

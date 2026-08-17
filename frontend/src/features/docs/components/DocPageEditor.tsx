@@ -1,8 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from 'react';
 import { Link } from 'react-router-dom';
-import { Check, History, Link2, Loader2, Paintbrush, X } from 'lucide-react';
+import { Check, History, Image as ImageIcon, Link2, Loader2, Paintbrush, X } from 'lucide-react';
 import { Button, Drawer, RichText, RichTextEditor, SymbolPicker } from '@/components/ui';
 import { MediaUploader } from '@/components/MediaUploader';
+import { ProseSkeleton } from '@/components/Skeletons';
 import { TeamSymbol, TEAM_SYMBOL_NAMES } from '@/components/TeamSymbol';
 import { cn } from '@/lib/utils';
 import { t } from '@/i18n';
@@ -12,6 +21,10 @@ import { contentRoot, describeRange, type TextAnchor } from '@/lib/textAnchor';
 import { DocLinkKind, IssueKind, TEAM_COLORS } from '@/types/enums';
 import type { DocAttachment, DocLink, DocPageDto } from '@/types/dto';
 import { useDoc, useDocComments, useUpdateDocPage } from '../api';
+import { CollabDocEditor } from '../collab/CollabDocEditor';
+import { CollabLive, CollabPresence } from '../collab/CollabPresence';
+import { resetCollabDoc } from '../collab/resetCollabDoc';
+import { useCollabSession } from '../collab/useCollabSession';
 import { pageStyleOf, typographyAttrs, widthClass, type DocPageStyle } from '../pageStyle';
 import { DocAttachments } from './DocAttachments';
 import { DocComments } from './DocComments';
@@ -102,11 +115,56 @@ export function DocPageEditor({
    * what restoring a version does — is to remount it under a fresh key.
    */
   const [seed, setSeed] = useState({ nonce: 0, html: page.content });
+  /**
+   * The title box grows with its text rather than scrolling it out of sight —
+   * a full-width heading only means something if a long title can take a second
+   * line. The height is *measured*, not computed, so it has to be re-taken
+   * whenever anything that moves the wrap point moves: the text itself, the
+   * page's measure, the font face, or the window.
+   */
+  const titleRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = titleRef.current;
+    if (!el) return;
+    const fit = () => {
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, [title, style.showTitle, style.fontStyle, style.pageWidth]);
 
-  // ── Comments ──────────────────────────────────────────────────────────────
-  // Every signed-in role except Guest, mirroring the backend's @Roles on these
-  // routes — a developer can't edit a doc's body but can absolutely argue with it.
-  const { canEditDelivery: canComment } = useAuth();
+  // Every signed-in role except Guest may comment, mirroring the backend's
+  // @Roles on those routes — a developer can't edit a doc's body but can
+  // absolutely argue with it.
+  const { user, canEditDelivery: canComment } = useAuth();
+
+  // ── Live collaboration ────────────────────────────────────────────────────
+  /**
+   * When there's a sync server, the body is a CRDT and this page stops saving it.
+   *
+   * `useCollabSession` returns null when `VITE_COLLAB_URL` is unset, which is the
+   * whole feature flag — no build depends on the service existing, and with it
+   * off every line below behaves exactly as it did before. Only writers connect:
+   * a reader is served the same static render as the public share view, so a
+   * socket would buy them nothing but a socket.
+   */
+  const collab = useCollabSession({
+    tenantId: user?.tenantId,
+    pageId: page.id,
+    user: user ? { id: user.id, name: user.name, avatarUrl: user.avatarUrl } : null,
+    enabled: canWrite,
+  });
+  /**
+   * Wait for the first sync before showing the editor.
+   *
+   * Not politeness — correctness. BlockNote binds to the fragment immediately,
+   * and an empty fragment is a legitimate document: mounting before the server's
+   * state arrives shows a blank page for a moment, and any keystroke in that
+   * moment is an edit to an empty document that then merges with the real one.
+   */
+  const collabReady = !!collab && collab.synced;
   const { data: comments } = useDocComments(page.docId, page.id);
   /** The box the highlights are measured and painted in. */
   const [box, setBox] = useState<HTMLDivElement | null>(null);
@@ -320,20 +378,44 @@ export function DocPageEditor({
   }
 
   // Offering "add a cover" while covers are switched off would contradict
-  // itself, so the button follows the switch.
+  // itself, so the button follows the switch. Same reasoning for links: the
+  // switch means "this page doesn't show them", and offering to attach one that
+  // won't appear would be a promise the page then breaks.
   const showAddCover = canWrite && style.showCover && !coverUrl;
-  // A band with a heading and nothing under it is worse than no band.
-  const linksOn = style.showLinks && (canWrite || links.length > 0);
+  const showAddLink = canWrite && style.showLinks;
+  // The band under the heading is the chips alone now — attaching happens from
+  // the row above the title — so with nothing linked there's nothing to draw,
+  // writer or not.
+  const linksOn = style.showLinks && links.length > 0;
   const filesOn = style.showAttachments && (canWrite || files.length > 0);
   const typo = typographyAttrs(style);
 
   /**
-   * The two controls that change how the page *looks*, gathered in one row so
-   * they read as the same class of thing. Rendered against the heading when
-   * there is one and revealed on hover; on their own line when the title is
-   * switched off, where there is nothing to hover and they stay visible.
+   * One row of quiet, icon-led buttons above the title, on its own line rather
+   * than beside the name — which is what lets the title keep the full measure:
+   * the row can grow, or wrap on a phone, and the heading never shortens to make
+   * room for it.
+   *
+   * It splits in two on purpose. Attaching a record is *work* — the reason
+   * someone opens this page in the first place — so it's always on screen and
+   * always in the same spot, no hovering required to find out it exists.
    */
-  const pageActions =
+  const linkAction = showAddLink ? (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      className="text-muted-foreground"
+      onClick={() => setLinkOpen(true)}
+    >
+      <Link2 className="mr-1.5 size-4" aria-hidden />
+      {t('docs.linkRecord')}
+    </Button>
+  ) : null;
+
+  /** The rest change how the page *looks* — occasional, and not what anyone came
+   *  here to do, so they keep out of the way until pointed at. */
+  const lookActions =
     showAddCover || canWrite ? (
       <>
         {showAddCover && (
@@ -342,6 +424,9 @@ export function DocPageEditor({
             multiple={false}
             variant="ghost"
             label={t('docs.addCover')}
+            // Beside "link" and "styles" the button names what it adds, not the
+            // mechanism it adds it by — an upload arrow would be the odd one out.
+            icon={<ImageIcon className="mr-1.5 size-4" aria-hidden />}
             className="text-muted-foreground"
             onUploaded={(m) => {
               setCoverUrl(m.url);
@@ -352,6 +437,7 @@ export function DocPageEditor({
         {canWrite && (
           <Button
             type="button"
+            size="sm"
             variant="ghost"
             className="text-muted-foreground"
             onClick={() => setStylesOpen(true)}
@@ -418,72 +504,106 @@ export function DocPageEditor({
           widthClass(style.pageWidth),
         )}
       >
-        {/* Symbol and title share one line, so the icon reads as part of the
-            heading rather than a row floating above it. "Add cover" rides the
-            same line and stays out of the way until you hover — the same
-            treatment the cover's own controls get above.
-            Hidden, the title is still edited from the rail — this switch is
+        {/* Actions, then the name, then the byline — the heading reads top to
+            bottom in the order you'd say it. Nothing shares the title's line, so
+            the page's name gets the whole measure and is never clipped, however
+            many actions the row grows to hold.
+            Hidden, the title is still edited from the rail — that switch is
             about the page's own look, not about whether the page has a name. */}
-        {style.showTitle ? (
-          <div className="group flex items-center gap-2">
-            {canWrite ? (
-              <SymbolPicker
-                variant="plain"
-                size={26}
-                value={icon || 'book'}
-                color={color}
-                options={TEAM_SYMBOL_NAMES}
-                colors={TEAM_COLORS}
-                ariaLabel={t('docs.pageIcon')}
-                onChange={(patch) => {
-                  // The picker sends whichever half changed, so patch just that
-                  // one — writing both would blank the other to its default.
-                  const next: PagePatch = {};
-                  if (patch.icon !== undefined) {
-                    setIcon(patch.icon);
-                    next.icon = patch.icon;
-                  }
-                  if (patch.color !== undefined) {
-                    setColor(patch.color);
-                    next.color = patch.color;
-                  }
-                  saveNow(next);
-                }}
-              />
-            ) : (
-              <TeamSymbol
-                name={icon || 'book'}
-                size={26}
-                className="shrink-0 text-muted-foreground"
-                color={color ?? undefined}
-              />
-            )}
-            <input
-              value={title}
-              readOnly={!canWrite}
-              onChange={(e) => {
-                setTitle(e.target.value);
-                queue({ title: e.target.value });
-              }}
-              onBlur={() => void flush()}
-              aria-label={t('docs.pageTitle')}
-              placeholder={t('docs.untitled')}
-              className="min-w-0 flex-1 border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-foreground outline-none placeholder:text-muted-foreground/60 sm:text-3xl"
-            />
-            {pageActions && (
-              <div className="flex shrink-0 items-center opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 max-sm:opacity-100">
-                {pageActions}
+        <div className="group">
+          {(linkAction || lookActions) && (
+            /* The row keeps its height whether or not the fading half is showing,
+               so pointing at the heading never shoves the title down a line. */
+            <div className="mb-1 flex min-h-8 flex-wrap items-center gap-0.5">
+              {linkAction}
+              {lookActions && (
+                /* Faded rather than unmounted, and from `sm` up only: a phone has
+                   no hover to reveal them with, so there they simply stay. While
+                   faded out the group is `pointer-events-none` — an invisible row
+                   that still swallowed clicks and lit the cursor up over blank
+                   space would be worse than showing it. */
+                <div
+                  className={cn(
+                    'flex flex-wrap items-center gap-0.5',
+                    style.showTitle &&
+                      'sm:pointer-events-none sm:opacity-0 sm:transition-opacity sm:focus-within:pointer-events-auto sm:focus-within:opacity-100 sm:group-hover:pointer-events-auto sm:group-hover:opacity-100',
+                  )}
+                >
+                  {lookActions}
+                </div>
+              )}
+            </div>
+          )}
+
+          {style.showTitle && (
+            <div className="flex items-start gap-2">
+              {/* A box the height of the title's first line, so the icon centres
+                  on that line and stays put when the title wraps — whichever of
+                  the two symbols is rendered, and at either title size. */}
+              <div className="flex h-8 shrink-0 items-center sm:h-9">
+                {canWrite ? (
+                  <SymbolPicker
+                    variant="plain"
+                    size={26}
+                    value={icon || 'book'}
+                    color={color}
+                    options={TEAM_SYMBOL_NAMES}
+                    colors={TEAM_COLORS}
+                    ariaLabel={t('docs.pageIcon')}
+                    onChange={(patch) => {
+                      // The picker sends whichever half changed, so patch just
+                      // that one — writing both would blank the other to its
+                      // default.
+                      const next: PagePatch = {};
+                      if (patch.icon !== undefined) {
+                        setIcon(patch.icon);
+                        next.icon = patch.icon;
+                      }
+                      if (patch.color !== undefined) {
+                        setColor(patch.color);
+                        next.color = patch.color;
+                      }
+                      saveNow(next);
+                    }}
+                  />
+                ) : (
+                  <TeamSymbol
+                    name={icon || 'book'}
+                    size={26}
+                    className="shrink-0 text-muted-foreground"
+                    color={color ?? undefined}
+                  />
+                )}
               </div>
-            )}
-          </div>
-        ) : (
-          // No heading to hang them on — and nothing to hover — so the same row
-          // keeps a line of its own and stays visible. Page Styles has to be
-          // reachable here too: it is the only way back to "show title", and
-          // hiding it along with the title would strand the page with no way to
-          // bring the heading back.
-          pageActions && <div className="flex items-center">{pageActions}</div>
-        )}
+              {/* A textarea, not an input: an input can only ever scroll a long
+                  title sideways past its own edge, which is the thing being
+                  fixed here. The *value* stays one line — Enter commits, and a
+                  pasted line break collapses to a space rather than becoming
+                  part of the name — it just wraps instead of hiding text. */}
+              <textarea
+                ref={titleRef}
+                value={title}
+                readOnly={!canWrite}
+                rows={1}
+                onChange={(e) => {
+                  const next = e.target.value.replace(/\s*[\r\n]+\s*/g, ' ');
+                  setTitle(next);
+                  queue({ title: next });
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  }
+                }}
+                onBlur={() => void flush()}
+                aria-label={t('docs.pageTitle')}
+                placeholder={t('docs.untitled')}
+                className="min-w-0 flex-1 resize-none overflow-hidden border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-foreground outline-none placeholder:text-muted-foreground/60 sm:text-3xl"
+              />
+            </div>
+          )}
+        </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           {/* Only the byline itself is switchable. Save status and history are
@@ -495,6 +615,19 @@ export function DocPageEditor({
                 .replace('{when}', timeAgo(page.updatedAt))}
             </span>
           )}
+          {/* Who's here now, in the row that already answers "who touched this"
+              — the same question asked in the present tense. */}
+          {collab && (
+            <CollabPresence peers={collab.peers} status={collab.status} />
+          )}
+          {/* With a CRDT there is no save to report: the body is saved the
+              instant it is typed, and a "Saving…" that never appears would just
+              be a widget nobody can interpret. Title and page styles still go
+              over REST, so the indicator stays for those — it simply has less to
+              say than it used to, which is why "Live" stands in beside it and
+              says the reassuring part instead. Writers only: a reader has no
+              work in flight to reassure them about. */}
+          {collab && canWrite && <CollabLive status={collab.status} />}
           <SaveStatus status={status} />
           {/* Sits with the byline because that's where "when did this change"
               already lives — history is the long answer to the same question. */}
@@ -538,17 +671,6 @@ export function DocPageEditor({
                   )}
                 </span>
               ))}
-              {canWrite && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 gap-1.5 text-xs text-muted-foreground"
-                  onClick={() => setLinkOpen(true)}
-                >
-                  <Link2 className="size-3.5" /> {t('docs.linkRecord')}
-                </Button>
-              )}
             </div>
             )}
 
@@ -571,12 +693,34 @@ export function DocPageEditor({
         <div ref={setBox} className="relative mt-4">
           <DocCommentLayer layout={layout} activeId={activeComment} hiddenIds={resolvedIds} />
           <div ref={setContent} className="relative z-[1]" onClick={pickThread}>
-            {canWrite ? (
+            {collab ? (
+              /* The collaborative body. Note what's missing: no `value`, and no
+                 `onChange` that queues a save. That absence *is* the feature —
+                 the Y.Doc is the document, and the sync server renders it back
+                 into `content` on its own debounce. Two people can type in the
+                 same paragraph because nobody is PATCHing an HTML string over
+                 the top of anybody else. Everything else on this page (title,
+                 icon, links, files, styles) still saves over REST exactly as
+                 before; only the body moved. */
+              collabReady ? (
+                <CollabDocEditor
+                  session={collab}
+                  onComment={canComment ? commentOnRange : undefined}
+                />
+              ) : (
+                <ProseSkeleton />
+              )
+            ) : canWrite ? (
               <RichTextEditor
                 key={seed.nonce}
                 value={seed.html}
                 images
                 diagrams
+                // `@` names a person in the page itself, the way it already does
+                // in a task or a comment. The chip is a reference, not a ping:
+                // notifications come from the comment thread, which is where a
+                // question actually gets asked.
+                mentions
                 minHeight={360}
                 placeholder={t('docs.write')}
                 onChange={(html) => queue({ content: html })}
@@ -620,7 +764,16 @@ export function DocPageEditor({
           if (timer.current) clearTimeout(timer.current);
           setStatus('idle');
           setTitle(restored.title);
-          setSeed((s) => ({ nonce: s.nonce + 1, html: restored.content }));
+          if (collab) {
+            // A remount would show the restored text to *this* window only, and
+            // the next keystroke would mirror the old body back over it. Asking
+            // the sync server to re-read the page applies it to the shared
+            // document instead, so it lands on every open copy at once — nothing
+            // to seed here, and no key to bump.
+            void resetCollabDoc(page.id);
+          } else {
+            setSeed((s) => ({ nonce: s.nonce + 1, html: restored.content }));
+          }
         }}
       />
 

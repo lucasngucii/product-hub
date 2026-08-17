@@ -2,6 +2,16 @@ import { ApiProperty } from '@nestjs/swagger';
 import { CustomFieldValue } from '@application/teams/domain/enums/custom-field.enums';
 import { BugAttachment, BugSeverity, IssueKind } from '../domain/enums/issue.enums';
 
+/** One person on an issue. Denormalized like a roadmap item's assignees, so a
+ *  board renders avatars and names without a user lookup. */
+export class IssueAssigneeDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty()
+  name: string;
+}
+
 /**
  * Flat issue shape — the union of the old Task and Bug responses with a `kind`.
  * Assignee/author/reporter names are denormalized so a list reads without needing
@@ -26,6 +36,18 @@ export class IssueResponseDto {
 
   @ApiProperty({ description: 'Parent issue id when this is a sub-task ("" if top-level)' })
   parentId: string;
+
+  /**
+   * The parent, denormalized — a bare `parentId` can't be rendered: the detail
+   * page would have to fetch the parent just to print its name, so it printed
+   * nothing and a sub-issue looked top-level. Only the **single-issue** read
+   * fills these (a list would be one lookup per row); elsewhere they're ''.
+   */
+  @ApiProperty({ description: "Parent's reference, for a breadcrumb ('' if top-level)", example: 'BUG-12' })
+  parentShortId: string;
+
+  @ApiProperty({ description: "Parent's title ('' if top-level)" })
+  parentTitle: string;
 
   @ApiProperty({ description: 'Human-friendly reference used in URLs', example: 'TSK-7' })
   shortId: string;
@@ -59,10 +81,16 @@ export class IssueResponseDto {
   })
   carryOverCount: number;
 
-  @ApiProperty()
+  @ApiProperty({
+    type: [IssueAssigneeDto],
+    description: 'Everyone on the issue, primary first (empty = unassigned)',
+  })
+  assignees: IssueAssigneeDto[];
+
+  @ApiProperty({ description: 'Primary assignee id — mirrors assignees[0] ("" = none)' })
   assigneeId: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'Primary assignee name — mirrors assignees[0]' })
   assigneeName: string;
 
   @ApiProperty()
@@ -124,4 +152,13 @@ export class IssueResponseDto {
 
   @ApiProperty()
   updatedAt: Date;
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'When the issue was solved — the moment it entered a done status ' +
+      '(resolved/closed for a bug, done for a task). null while it is open, and ' +
+      'cleared again if it is reopened. Server-owned: a client cannot set it.',
+  })
+  resolvedAt: Date | null;
 }

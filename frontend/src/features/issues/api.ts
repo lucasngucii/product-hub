@@ -22,6 +22,8 @@ export interface IssueQuery {
   /** Bug severity filter (ignored for tasks). */
   severity?: BugSeverity[];
   assigneeId?: string[];
+  /** Who opened the issue — user id(s). */
+  createdBy?: string[];
   /** Issues assigned to this user id (the "Assigned to me" views). */
   mine?: string;
   /** The caller's private personal board (owner from the token, never a param). */
@@ -38,7 +40,28 @@ export interface IssueQuery {
   reportId?: string;
   /** Free-text search over title / description / id / shortId. */
   search?: string;
+  /** Opened on/after this instant (or `YYYY-MM-DD`, read as that UTC day). */
+  createdFrom?: string;
+  /** Opened on/before this instant — inclusive. */
+  createdTo?: string;
+  /** Solved (moved to a done status) on/after this instant. Still-open issues
+   *  have no solved date, so either end on its own also excludes them. */
+  resolvedFrom?: string;
+  /** Solved on/before this instant — inclusive. */
+  resolvedTo?: string;
+  /** Sort field. Omit to keep the board ordering (drag position, then newest first) —
+   *  the kanban view must always omit it. */
+  sort?: IssueSortField;
+  /** Sort direction; defaults to `desc` server-side. */
+  dir?: IssueSortDir;
 }
+
+/** The API's `sort` values — shared so the task and bug queries (which hit the very
+ *  same `/issues` endpoint) and the `SortMenu` all name one set. `severity` orders
+ *  by the bug scale (low → critical), so only a list that can hold bugs offers it. */
+export type IssueSortField = 'id' | 'created' | 'updated' | 'severity';
+/** The API's `dir` values; the server defaults to `desc`. */
+export type IssueSortDir = 'asc' | 'desc';
 
 /**
  * Create an issue. `kind` picks task vs bug; the kind-specific fields are simply
@@ -51,6 +74,9 @@ export interface CreateIssueInput {
   description?: string;
   /** Built-in status or a team's custom column key. Defaults to the kind's first column. */
   status?: string;
+  /** Everyone to put on it, primary first. Wins over `assigneeId`. */
+  assigneeIds?: string[];
+  /** One-person shorthand for {@link assigneeIds}. */
   assigneeId?: string;
   /** Start of the work window, ISO `YYYY-MM-DD`. */
   startDate?: string;
@@ -95,7 +121,9 @@ export interface UpdateIssueInput {
   /** Commit to a team cycle — one of the issue's team's current/upcoming cycle
    *  ids ('' leaves the cycle; completed cycles are rejected server-side). */
   cycleId?: string;
-  /** Empty string unassigns. */
+  /** Replaces the whole list, primary first (`[]` unassigns). Wins over `assigneeId`. */
+  assigneeIds?: string[];
+  /** One-person shorthand for {@link assigneeIds}; empty string unassigns. */
   assigneeId?: string;
   startDate?: string;
   endDate?: string;

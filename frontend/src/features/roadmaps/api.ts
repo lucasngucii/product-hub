@@ -4,8 +4,16 @@ import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '@/lib/api';
 import { t } from '@/i18n';
 import type { RoadmapColumn, RoadmapDto, RoadmapItem } from '@/types/dto';
 
-export function useRoadmaps() {
-  return useQuery({ queryKey: ['roadmaps'], queryFn: () => apiGet<RoadmapDto[]>('/roadmaps') });
+/** Every roadmap with its items inlined. `enabled: false` still reads whatever
+ *  is already cached — it only skips the request — so a caller that needs the
+ *  data *if someone else fetched it* (an issue's breadcrumb resolving one ref)
+ *  can opt out of paying for it. */
+export function useRoadmaps(enabled = true) {
+  return useQuery({
+    queryKey: ['roadmaps'],
+    queryFn: () => apiGet<RoadmapDto[]>('/roadmaps'),
+    enabled,
+  });
 }
 
 export function useRoadmap(id: string | undefined) {
@@ -21,6 +29,10 @@ function useInvalidate() {
   return () => {
     qc.invalidateQueries({ queryKey: ['roadmaps'] });
     qc.invalidateQueries({ queryKey: ['roadmap'] });
+    // Every write here can change an item's history — its own timeline, and the
+    // *related* rows an issue linked to it renders. A prefix invalidation: the
+    // key is ['activity', entity, entityId] (activity-log/api.ts).
+    qc.invalidateQueries({ queryKey: ['activity'] });
   };
 }
 

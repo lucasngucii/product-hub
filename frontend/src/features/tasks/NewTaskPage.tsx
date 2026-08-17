@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Circle, CircleUser, Gauge, Map as MapIcon, Triangle } from 'lucide-react';
+import { Circle, Gauge, Map as MapIcon, Triangle } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { useEscapeBack } from '@/lib/useEscapeBack';
 import {
@@ -15,13 +15,13 @@ import {
 import { t } from '@/i18n';
 import { PageHeader } from '@/layouts/headers/PageHeader';
 import { Icon } from '@/components/Icon';
+import { AssigneeField } from '@/components/AssigneeField';
 import { initials } from '@/lib/format';
-import { useUsers } from '@/features/users/api';
 import { DetailGrid, PropField, PropSection, PropSidebar } from '@/features/issues/IssueDetail';
 import { useTeams, useTeamStatuses } from '@/features/teams/api';
 import { TeamIconPicker } from '@/features/teams/TeamIconPicker';
 import { CyclePropField } from '@/features/cycles/CycleControls';
-import { useRoadmaps } from '@/features/roadmaps/api';
+import { useBacklogLink } from '@/features/roadmaps/useBacklogLink';
 import { TASK_ESTIMATES, TeamIssueType, taskEstimateLabel } from '@/types/enums';
 import { CenteredPageLayout } from '@/layouts/shared';
 import { useCreateTask } from './api';
@@ -51,9 +51,6 @@ export function NewTaskPage() {
   const presetCycleId = searchParams.get('cycleId') || undefined;
 
   const create = useCreateTask();
-  const { data: usersData } = useUsers({ limit: 100 });
-  const users = usersData?.items ?? [];
-  const { data: roadmaps } = useRoadmaps();
   // Columns of the team that will own the task (default task team when standalone).
   const columns = useTeamStatuses(teamId, TeamIssueType.TASK);
 
@@ -61,7 +58,8 @@ export function NewTaskPage() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [status, setStatus] = useState<string | undefined>(presetStatus);
-  const [assigneeId, setAssigneeId] = useState(user?.id ?? '');
+  // Starts on you — the common case is filing your own work; add anyone else.
+  const [assigneeIds, setAssigneeIds] = useState<string[]>(user ? [user.id] : []);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [estimate, setEstimate] = useState(0);
@@ -100,38 +98,15 @@ export function NewTaskPage() {
     </span>
   );
 
-  // "No backlog item" first, then every roadmap item (roadmap-qualified for clarity).
-  const itemOptions = useMemo(
-    () => [
-      { value: '', label: t('tasks.noBacklogItem') },
-      ...(roadmaps ?? []).flatMap((r) =>
-        (r.items ?? []).map((it) => ({
-          value: it.id,
-          label: `${r.title} · ${r.columns?.find((c) => c.key === it.phase)?.label ?? it.phase} · ${it.title}`,
-        })),
-      ),
-    ],
-    [roadmaps],
-  );
-  // itemId → the flat backlog link stored on the task (same shape the panel writes).
-  const linkFor = useMemo(() => {
-    const map = new Map<string, { roadmapId: string; projectId: string; label: string }>();
-    (roadmaps ?? []).forEach((r) =>
-      (r.items ?? []).forEach((it) =>
-        map.set(it.id, {
-          roadmapId: r.id,
-          projectId: r.projectId,
-          label: `${r.columns?.find((c) => c.key === it.phase)?.label ?? it.phase} · ${it.title}`,
-        }),
-      ),
-    );
-    return map;
-  }, [roadmaps]);
+  // "No backlog item" first, then every roadmap item — and the flat link to store
+  // for the chosen one. Shared with both detail sidebars so the label a task is
+  // created with is the same one re-linking it later would write.
+  const { options: itemOptions, linkFor } = useBacklogLink();
 
   function submit() {
     if (!title.trim() || create.isPending) return;
     setError(null);
-    const link = itemId ? linkFor.get(itemId) : undefined;
+    const link = linkFor(itemId);
     create.mutate(
       {
         title: title.trim(),
@@ -140,14 +115,14 @@ export function NewTaskPage() {
         // Sent so a team board's task lands in that team, not the workspace default.
         teamId,
         cycleId: cycleId || undefined,
-        assigneeId: assigneeId || undefined,
+        assigneeIds,
         startDate: startDate || undefined,
         endDate: endDate || undefined,
         estimate: estimate || undefined,
-        roadmapItemId: itemId || undefined,
-        roadmapItemLabel: link?.label,
-        roadmapId: link?.roadmapId,
-        projectId: link?.projectId,
+        roadmapItemId: link.roadmapItemId || undefined,
+        roadmapItemLabel: link.roadmapItemLabel || undefined,
+        roadmapId: link.roadmapId || undefined,
+        projectId: link.projectId || undefined,
       },
       {
         // Straight into the task we just made — replace, so Back skips the form.
@@ -200,6 +175,8 @@ export function NewTaskPage() {
               placeholder={t('tasks.addDescription')}
               minHeight={80}
               images
+              // `@` names a person here too — a reference in the text, not a ping.
+              mentions
               className="border-0"
             />
           </div>
@@ -227,15 +204,11 @@ export function NewTaskPage() {
             </PropField>
 
             <PropField bare label={t('tasks.assignee')}>
-              <Combobox
-                leadingIcon={<CircleUser />}
-                value={assigneeId}
-                onChange={setAssigneeId}
-                placeholder={t('tasks.unassigned')}
-                options={[
-                  { value: '', label: t('tasks.unassigned') },
-                  ...users.map((u) => ({ value: u.id, label: u.name })),
-                ]}
+              <AssigneeField
+                multiple
+                value={assigneeIds}
+                onChange={setAssigneeIds}
+                aria-label={t('tasks.assignee')}
               />
             </PropField>
 

@@ -98,6 +98,9 @@ const TIMELINE_BARS: Array<[number, number]> = [
  * The timeline (Gantt) view mid-load: rows of a left-hand label + a bar floated
  * along a track. Matches the board pages' `timeline` view, so it drops into the
  * same content slot (below the shared chrome, which stays visible).
+ *
+ * The rail is two lines, like a real row — a title over its chips (status,
+ * labels, people) — so the layout doesn't jump when the rows land.
  */
 export function TimelineSkeleton({ rows = 7 }: { rows?: number }) {
   return (
@@ -106,7 +109,13 @@ export function TimelineSkeleton({ rows = 7 }: { rows?: number }) {
         const [offset, width] = TIMELINE_BARS[i % TIMELINE_BARS.length];
         return (
           <div key={i} className="flex items-center gap-4">
-            <Skeleton className="h-3.5 w-32 shrink-0 sm:w-40" />
+            <div className="flex w-40 shrink-0 flex-col gap-1.5 sm:w-56">
+              <Skeleton className="h-3.5 w-32 sm:w-40" />
+              <div className="flex items-center gap-1">
+                <Skeleton className="h-3 w-12 rounded" />
+                <Skeleton className="h-3 w-16 rounded" />
+              </div>
+            </div>
             <div className="relative h-7 flex-1 rounded-md bg-muted/30">
               <Skeleton
                 className="absolute top-1 h-5 rounded-md"
@@ -219,6 +228,32 @@ export function TableSkeleton({ rows = 6, cols = 4 }: { rows?: number; cols?: nu
  * block — beside a fixed 260px properties column that drops below on mobile.
  * Drop it into the same content slot the real detail fills.
  */
+/**
+ * A page of prose mid-load — paragraphs of uneven line lengths broken by a
+ * heading. For a doc page waiting on its first sync from the collaboration
+ * server: it holds the column's width and rhythm so the real text lands where
+ * the grey lines were instead of pushing the page down.
+ *
+ * Deliberately ragged and fixed (not random), so it reads as writing rather than
+ * a grid, and doesn't reshuffle on every render.
+ */
+const PROSE_LINES = ['100%', '96%', '88%', '', '92%', '100%', '78%', '', '100%', '84%'];
+
+export function ProseSkeleton() {
+  return (
+    <div className="flex flex-col gap-3 py-1" aria-hidden>
+      {PROSE_LINES.map((width, i) =>
+        // An empty entry is a paragraph break — a taller gap, no line.
+        width ? (
+          <Skeleton key={i} className="h-4" style={{ width }} />
+        ) : (
+          <Skeleton key={i} className="mt-3 h-5 w-40" />
+        ),
+      )}
+    </div>
+  );
+}
+
 export function DetailSkeleton() {
   return (
     <div className="grid items-start gap-8 md:grid-cols-[minmax(0,1fr)_260px]">

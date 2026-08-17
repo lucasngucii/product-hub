@@ -1,7 +1,9 @@
 import { useNavigate } from 'react-router-dom';
-import { t } from '@/i18n';
 import { PageHeader } from '@/layouts/headers/PageHeader';
 import { useEscapeBack } from '@/lib/useEscapeBack';
+import { useIssueCrumbParent } from '@/features/issues/useIssueCrumb';
+import { IssueKind } from '@/types/enums';
+import { useBug } from './api';
 import { BugDetail } from './components/BugDetail';
 import { CenteredPageLayout } from '@/layouts/shared';
 
@@ -11,12 +13,23 @@ export function BugDetailPage({ issueRef: bugId }: { issueRef: string }) {
   const navigate = useNavigate();
   useEscapeBack();
 
+  // Fetched only for the crumb (title + team); <BugDetail> re-reads the same
+  // query (React Query dedupes it) for the body.
+  const { data: bug } = useBug(bugId);
+  const parent = useIssueCrumbParent(IssueKind.BUG, bug);
+
   return (
     <CenteredPageLayout>
-      {/* The topbar breadcrumb replaces the old back link. Bugs aren't in the
-          nav model, so the parent is named here. */}
-      <PageHeader title={bugId ?? ''} parent={{ to: '/bugs', label: t('bugs.title') }} />
-      <BugDetail bugId={bugId} onDeleted={() => navigate('/bugs')} menuTarget="topbar" />
+      {/* Breadcrumb — `All issues › QC › <backlog item> › <parent> › <this bug>`,
+          the same shape a task's page reads, resolved by the shared hook so the
+          two can't drift. Titles, not refs: the ref is right there in the body
+          and in the URL, so spending the trail on it says nothing. */}
+      <PageHeader
+        title={bug?.title || bug?.shortId || bugId || ''}
+        subtitle={bug?.shortId}
+        parent={parent}
+      />
+      <BugDetail bugId={bugId} onDeleted={() => navigate('/issues?kind=bug')} menuTarget="topbar" />
     </CenteredPageLayout>
   );
 }

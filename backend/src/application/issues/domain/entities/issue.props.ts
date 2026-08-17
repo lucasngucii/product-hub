@@ -2,6 +2,12 @@ import { UniqueEntityID } from '@core/domain';
 import { CustomFieldValue } from '@application/teams/domain/enums/custom-field.enums';
 import { BugAttachment, BugSeverity, IssueKind } from '../enums/issue.enums';
 
+/** One person on an issue: their id plus the name as it was when assigned. */
+export interface IssueAssignee {
+  id: string;
+  name: string;
+}
+
 /**
  * The unified issue — the flat union of the old Task and Bug props with a `kind`
  * discriminator. Fields that apply to only one kind carry a neutral default on
@@ -27,6 +33,18 @@ export interface IssueProps {
   /** Human-friendly per-tenant reference used in URLs, e.g. `TSK-7` / `BUG-12`.
    *  The internal UUID remains the real identity. */
   shortId: string;
+  /**
+   * The two halves of a sequential `shortId`, denormalized so a list can sort by
+   * ID on an index instead of parsing the ref string. Written once at mint and
+   * never recomputed — an issue that moves team keeps the pair matching its
+   * frozen `shortId`.
+   *
+   * **Both are absent on every issue created before sequential refs**, and stay
+   * absent: those rows are never written to. Missing sorts as null in Mongo, so
+   * they group together and `createdAt` orders them within the group.
+   */
+  refPrefix?: string;
+  refSeq?: number;
   title: string;
   description: string;
   /** Column key: a built-in status (`TaskStatus`/`BugStatus`) or a custom slug. */
@@ -53,7 +71,22 @@ export interface IssueProps {
   carryOverCount: number;
 
   // ── people ───────────────────────────────────────────────────────────────
+  /**
+   * Everyone on this issue, in the order they were added. The name is
+   * denormalized (like a roadmap item's assignees) so a list renders without a
+   * user lookup, and a since-removed member still shows as who they were.
+   */
+  assignees: IssueAssignee[];
+  /**
+   * @deprecated Legacy mirror of `assignees[0]` — the *primary* assignee. Kept in
+   * sync by the entity, never set on its own: it's what every pre-multi-assign
+   * reader still uses (the Mongo index, the compact list rows, MCP, webhooks), so
+   * multi-assign needed no migration. Query on **both** — see the repository's
+   * assignee filter, which `$or`s them because an issue written before this
+   * existed has the mirror but an empty `assignees`.
+   */
   assigneeId: string;
+  /** @deprecated Legacy mirror of `assignees[0].name`. See {@link assigneeId}. */
   assigneeName: string;
   /** Who opened the issue. For a bug this is its reporter (mirrored below). */
   createdBy: string;
@@ -97,4 +130,16 @@ export interface IssueProps {
   order: number;
   createdAt: Date;
   updatedAt: Date;
+  /**
+   * When this issue became **finished** — the moment it entered a completed
+   * status (`COMPLETED_STATUS_KEYS`: resolved/closed for a bug, done for a task)
+   * and stayed there. `null` while it is open.
+   *
+   * Owned entirely by {@link IssueEntity.setStatus}: the *first* move into a
+   * completed status stamps it (so resolved → closed keeps the moment it was
+   * actually fixed), and moving back out — a reopen — clears it, because a
+   * reopened bug is not solved and must not carry a solve date. A client can
+   * never set or backdate it.
+   */
+  resolvedAt: Date | null;
 }

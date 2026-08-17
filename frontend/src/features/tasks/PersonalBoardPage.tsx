@@ -5,6 +5,8 @@ import { Badge, Button, Dialog, DotLabel, Input, Menu, Select } from '@/componen
 import { BoardSkeleton, ListSkeleton } from '@/components/Skeletons';
 import { BOARD_GUTTER, IssueBoardLayout } from '@/components/IssueBoardLayout';
 import { BoardCard, BoardCardAge, KanbanBoard, KanbanCardToolbar } from '@/components/KanbanBoard';
+import { SortMenu } from '@/features/issues/SortMenu';
+import { useIssueSort } from '@/features/issues/useIssueSort';
 import { PersonalColumnsDialog } from './components/PersonalColumnsDialog';
 import { t } from '@/i18n';
 import { cn } from '@/lib/utils';
@@ -36,8 +38,20 @@ export function PersonalBoardPage() {
   };
 
   const [search, setSearch] = useState('');
+  // List-view ordering only (see `SortMenu`), and opt-in like every other issue
+  // list: a personal task carries a real `TSK-n` ref, so ordering by ID means the
+  // same thing here as it does on the team boards. The board view sends neither
+  // param — a sort would overwrite the drag order it is built on. Held in
+  // ?sort=&dir= beside ?view=, so a reload keeps the list as you left it.
+  const [sort, setSort] = useIssueSort();
+  const isList = view === 'list';
   // `personal: true` returns only my own personal tasks (owner from the token).
-  const { data, isLoading } = useTasks({ personal: true, search: search || undefined });
+  const { data, isLoading } = useTasks({
+    personal: true,
+    search: search || undefined,
+    sort: isList && sort ? sort.field : undefined,
+    dir: isList && sort ? sort.dir : undefined,
+  });
   const tasks = data?.items ?? [];
 
   const setStatus = useSetTaskStatus();
@@ -60,6 +74,7 @@ export function PersonalBoardPage() {
       title={t('personal.title')}
       subtitle={t('personal.subtitle')}
       search={{ value: search, onChange: setSearch, placeholder: t('personal.search') }}
+      sort={isList ? <SortMenu value={sort} onChange={setSort} /> : undefined}
       view={{
         value: view,
         onChange: (v) => setView(v as 'board' | 'list'),
@@ -92,12 +107,12 @@ export function PersonalBoardPage() {
       }
     >
       {loading ? (
-        view === 'list' ? (
+        isList ? (
           <ListSkeleton inset />
         ) : (
           <BoardSkeleton columns={columns.length || 4} />
         )
-      ) : view === 'board' ? (
+      ) : !isList ? (
         // Render the board even when empty, so the columns and their hover "+ Add"
         // are there to start from — a fresh personal board should feel usable, not blank.
         <KanbanBoard
